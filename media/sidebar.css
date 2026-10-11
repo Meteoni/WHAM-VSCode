@@ -1,0 +1,40 @@
+/* Keep tab widths stable when a longer screen needs vertical scrolling. */
+html { scrollbar-gutter: stable; }
+body { margin: 0; padding: 12px; color: var(--vscode-foreground); font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, sans-serif); }
+[hidden] { display: none !important; }
+h1 { font-size: 18px; line-height: 1.35; margin: 18px 0 8px; font-weight: 600; overflow-wrap: anywhere; }
+h2 { font-size: 13px; margin: 20px 0 8px; } h2 span { margin-left: 5px; color: var(--vscode-descriptionForeground); }
+p { margin: 8px 0; } small, .muted { color: var(--vscode-descriptionForeground); } .muted { font-size: 12px; }
+label { display: block; margin: 12px 0 4px; } small { display: block; }
+input, select, textarea { box-sizing: border-box; width: 100%; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 6px 8px; font: inherit; }
+textarea { resize: vertical; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+/* Follow GitHub Pull Requests' themed primary/secondary button treatment. */
+button { cursor: pointer; background: var(--vscode-button-secondaryBackground, var(--vscode-input-background)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--vscode-button-secondaryBorder, var(--vscode-contrastBorder, var(--vscode-widget-border, var(--vscode-panel-border, currentColor)))); padding: 3px 12px; font: inherit; line-height: 18px; border-radius: 4px; user-select: none; max-width: 100%; }
+button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground, var(--vscode-input-background))); }
+button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); }
+button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
+button:disabled { opacity: .45; cursor: default; } :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+/* Navigation uses editor tab colors and a straight active border, independently of buttons. */
+nav { display: flex; gap: 0; background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background)); border-bottom: 1px solid var(--vscode-editorGroupHeader-tabsBorder, var(--vscode-panel-border)); margin-bottom: 14px; }
+nav button { flex: 1; min-width: 0; margin: 0; padding: 6px 8px; background: var(--vscode-tab-inactiveBackground, var(--vscode-sideBar-background)); color: var(--vscode-tab-inactiveForeground, var(--vscode-descriptionForeground)); border: 0; border-top: 2px solid transparent; border-right: 1px solid var(--vscode-tab-border, var(--vscode-panel-border)); border-radius: 0; }
+nav button:last-child { border-right: 0; }
+nav button:hover:not(:disabled) { background: var(--vscode-tab-hoverBackground, var(--vscode-toolbar-hoverBackground)); color: var(--vscode-tab-hoverForeground, var(--vscode-foreground)); }
+nav button[aria-current="page"] { background: var(--vscode-tab-activeBackground, var(--vscode-input-background)); color: var(--vscode-tab-activeForeground, var(--vscode-foreground)); border-top-color: var(--vscode-tab-activeBorderTop, var(--vscode-focusBorder)); }
+nav button:focus-visible { outline-offset: -3px; }
+.setup-options { display: grid; gap: 10px; margin: 20px 0; }
+.setup-options button { display: block; text-align: left; padding: 12px; }
+.setup-options strong, .setup-options span { display: block; } .setup-options span { font-size: 12px; margin-top: 5px; color: var(--vscode-descriptionForeground); }
+.toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin: 9px 0; }
+.entry { padding: 12px 0; border-bottom: 1px solid var(--vscode-panel-border); } .entry p { margin: 5px 0 8px; font-size: 12px; overflow-wrap: anywhere; }
+.entry-heading { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.link { padding: 0; border: 0; background: none; color: var(--vscode-textLink-foreground); overflow-wrap: anywhere; text-align: left; } .link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.badge { font-size: 10px; padding: 2px 6px; border: 1px solid var(--vscode-panel-border); border-radius: 8px; white-space: nowrap; }
+.current { color: var(--vscode-testing-iconPassed); } .blocked, .stale, .warning, #metadata-issues { color: var(--vscode-editorWarning-foreground); } .generating, .pending { color: var(--vscode-progressBar-background); }
+.danger, #error { color: var(--vscode-errorForeground); }
+#error, #notice, #root, #metadata-issues { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; }
+#error:empty, #notice:empty, #folder-status:empty, #metadata-issues:empty { display: none; }
+.project-location { margin-top: 6px; font-size: 12px; } summary { cursor: pointer; color: var(--vscode-descriptionForeground); }
+.checkbox { display: flex; align-items: center; gap: 8px; margin: 15px 0; } .checkbox input { width: auto; }
+dt { font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 10px; }
+dd { margin: 2px 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre { padding: 10px; background: var(--vscode-textCodeBlock-background); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 var(--vscode-editor-font-family, monospace); }

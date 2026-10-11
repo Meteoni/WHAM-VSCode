@@ -1,0 +1,9 @@
+src/**
+test/**
+work/**
+.vscode/**
+tsconfig.json
+package-lock.json
+*.zip
+*.vsix
+examples/demo/output/**

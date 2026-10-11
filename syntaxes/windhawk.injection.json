@@ -1,0 +1,150 @@
+{
+  "scopeName": "source.cpp.wham",
+  "injectionSelector": "L:source.cpp - comment - string - meta.embedded",
+  "patterns": [
+    {
+      "include": "#mod-info-wrapper"
+    },
+    {
+      "include": "#yaml-settings-wrapper"
+    },
+    {
+      "include": "#markdown-readme-wrapper"
+    }
+  ],
+  "repository": {
+    "mod-info-wrapper": {
+      "name": "text.windhawk-mod-info-wrapper",
+      "begin": "^[ \\t]*//[ \t]+==WindhawkMod==[ \t]*$",
+      "end": "^[ \\t]*//[ \t]+==/WindhawkMod==[ \t]*$",
+      "beginCaptures": {
+        "0": {
+          "name": "comment.line.double-slash.cpp"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "comment.line.double-slash.cpp"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#mod-info"
+        }
+      ]
+    },
+    "mod-info": {
+      "name": "text.windhawk-mod-info",
+      "match": "\\/\\/[ \t]+(@(?:id|version|github|twitter|homepage|compilerOptions|license|donateUrl|name|description|author|include|exclude|architecture)(?::([a-z]{2}(?:-[A-Z]{2})?))?)\\b(.*)",
+      "captures": {
+        "0": {
+          "name": "comment.line.double-slash.cpp"
+        },
+        "1": {
+          "name": "storage.type.class.doxygen.cpp"
+        }
+      }
+    },
+    "yaml-settings-wrapper": {
+      "name": "text.yaml.windhawk-settings-wrapper",
+      "begin": "^[ \\t]*//[ \t]+==WindhawkModSettings==[ \t]*$",
+      "end": "^[ \\t]*//[ \t]+==/WindhawkModSettings==[ \t]*$",
+      "beginCaptures": {
+        "0": {
+          "name": "comment.line.double-slash.cpp"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "comment.line.double-slash.cpp"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#yaml-settings"
+        }
+      ]
+    },
+    "yaml-settings": {
+      "name": "text.yaml.windhawk-settings",
+      "begin": ".*(/\\*).*",
+      "end": ".*(\\*/).*",
+      "beginCaptures": {
+        "1": {
+          "name": "comment.block.cpp"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "comment.block.cpp"
+        }
+      },
+      "contentName": "meta.embedded.block.yaml",
+      "patterns": [
+        {
+          "include": "#yaml-settings-marker"
+        },
+        {
+          "include": "source.yaml"
+        }
+      ]
+    },
+    "yaml-settings-marker": {
+      "match": "^([ \t]*)(#! )(.*)$",
+      "captures": {
+        "2": {
+          "name": "keyword.other.windhawk-settings-marker"
+        },
+        "3": {
+          "patterns": [
+            {
+              "include": "source.yaml"
+            }
+          ]
+        }
+      }
+    },
+    "markdown-readme-wrapper": {
+      "name": "text.markdown.windhawk-readme-wrapper",
+      "begin": "^[ \\t]*//[ \t]+==WindhawkModReadme==[ \t]*$",
+      "end": "^[ \\t]*//[ \t]+==/WindhawkModReadme==[ \t]*$",
+      "beginCaptures": {
+        "0": {
+          "name": "comment.line.double-slash.cpp"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "comment.line.double-slash.cpp"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#markdown-readme"
+        }
+      ]
+    },
+    "markdown-readme": {
+      "name": "text.markdown.windhawk-readme",
+      "begin": ".*(/\\*).*",
+      "end": ".*(\\*/).*",
+      "beginCaptures": {
+        "1": {
+          "name": "comment.block.cpp"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "comment.block.cpp"
+        }
+      },
+      "contentName": "meta.embedded.block.markdown",
+      "patterns": [
+        {
+          "include": "text.html.markdown"
+        }
+      ]
+    }
+  },
+  "$comment": "Adapted from Ramen Software's Windhawk C++ injection grammar, GPL-3.0-only. WHAM changes on 2026-10-11: distinct scope name, exclusion of strings/comments/embedded content, and indented wrapper markers. See THIRD-PARTY-NOTICES.md."
+}

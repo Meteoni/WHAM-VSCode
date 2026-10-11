@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Windhawk Amalgamation Project",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": { "const": 1, "default": 1 },
+    "sourceDirectory": { "type": "string", "default": "src", "description": "Portable path relative to project root." },
+    "outputDirectory": { "type": "string", "default": "output", "description": "Must not overlap sourceDirectory." },
+    "entries": { "type": "array", "items": { "type": "string" }, "default": ["**/*.cpp"], "description": "Entry globs relative to sourceDirectory." },
+    "exclude": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "includeDirectories": { "type": "array", "items": { "type": "string" }, "default": ["src"], "description": "Ordered search directories relative to project root." },
+    "externalIncludes": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Exact quoted header names or complete macro include expressions to leave external." },
+    "inlineAngleIncludes": { "type": "boolean", "default": false },
+    "generate": { "enum": ["onSave", "manual"], "default": "onSave" },
+    "debounceMs": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 250 }
+  }
+}
