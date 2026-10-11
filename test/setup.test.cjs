@@ -6,7 +6,7 @@ const { execFileSync } = require('node:child_process');
 const { parse } = require('jsonc-parser');
 const { defaults } = require('../dist/config');
 const { generateEntry, restoreSource } = require('../dist/engine');
-const { setupProject, gitStatus, editorConfiguration, readEditorSettings, mergeRecoveries } = require('../dist/setup');
+const { setupProject, createInitialCommit, gitStatus, editorConfiguration, readEditorSettings, mergeRecoveries } = require('../dist/setup');
 const { nodeFiles, commitRestore } = require('../dist/io');
 
 test('new Git setup and ignore rules are idempotent and preserve an enclosing repository', async () => {
@@ -14,12 +14,12 @@ test('new Git setup and ignore rules are idempotent and preserve an enclosing re
   const git = process.env.WHAM_TEST_GIT || 'git';
   try {
     await fs.writeFile(path.join(root, '.gitignore'), '# keep this\nprivate/\n');
-    await setupProject(root, { git }); await setupProject(root, { git });
+    assert.equal((await setupProject(root, { git })).gitInitialized, true); assert.equal((await setupProject(root, { git })).gitInitialized, false);
     assert.ok((await fs.stat(path.join(root, '.git'))).isDirectory());
     const ignore = await fs.readFile(path.join(root, '.gitignore'), 'utf8'); assert.ok(ignore.startsWith('# keep this\nprivate/\n'));
     assert.equal(ignore.split('/output/').length - 1, 1);
     const status = await gitStatus(root, git); assert.ok(status.branch); assert.ok(status.changes > 0);
-    const child = path.join(root, 'nested'); await fs.mkdir(child); await setupProject(child, { git });
+    const child = path.join(root, 'nested'); await fs.mkdir(child); assert.equal((await setupProject(child, { git })).gitInitialized, false);
     await assert.rejects(fs.stat(path.join(child, '.git')), /ENOENT/);
     assert.equal((await gitStatus(child, git)).root.toLowerCase(), root.split(path.sep).join('/').toLowerCase());
     execFileSync(git, ['-C', root, 'check-ignore', 'output/anything.wh.cpp']);
@@ -71,5 +71,50 @@ test('recover multiple mods, deduplicate shared files, retain entries and detect
     const conflict = mergeRecoveries([restoreSource(a.bytes), edited]); assert.deepEqual(conflict.conflicts, ['src/shared.h']);
     await assert.rejects(commitRestore(conflict, path.join(root, 'blocked')), /Unresolved/); await assert.rejects(fs.stat(path.join(root, 'blocked')), /ENOENT/);
     assert.ok(!JSON.stringify(combined.manifest.config).includes(root));
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('initial commit contains only setup and recovered sources, and protects existing repositories/staging', async () => {
+  const root = path.resolve('work', 'initial-commit-' + Date.now()), git = process.env.WHAM_TEST_GIT || 'git';
+  await fs.mkdir(root, { recursive: true });
+  const gitRun = (...args) => execFileSync(git, ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' });
+  try {
+    const project = await setupProject(root, { git }); assert.equal(project.gitInitialized, true);
+    gitRun('config', 'user.name', 'WHAM Test'); gitRun('config', 'user.email', 'wham-test@example.invalid');
+    gitRun('config', 'commit.gpgsign', 'false'); gitRun('config', 'core.hooksPath', path.join(root, 'empty-hooks'));
+    const editor = await editorConfiguration(project, { installationPath: '', integration: 'cpp', indentStyle: 'spaces', indentSize: 2 });
+    for (const [file, bytes] of editor) { await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true }); await fs.writeFile(path.join(root, file), bytes); }
+    await fs.writeFile(path.join(root, 'src/recovered.cpp'), 'int recovered;');
+    await fs.writeFile(path.join(root, 'src/shared [1].h'), 'int shared;');
+    await fs.writeFile(path.join(root, 'unrelated.txt'), 'leave me alone');
+    await fs.writeFile(path.join(root, 'output/recovered.wh.cpp'), 'generated');
+    gitRun('add', 'unrelated.txt');
+    await assert.rejects(createInitialCommit(project, ['src/recovered.cpp'], git), /staged changes/);
+    assert.equal(gitRun('diff', '--cached', '--name-only').trim(), 'unrelated.txt');
+    gitRun('rm', '--cached', 'unrelated.txt');
+    await createInitialCommit(project, ['src/recovered.cpp', 'src/shared [1].h'], git);
+    assert.deepEqual(gitRun('ls-tree', '-r', '--name-only', 'HEAD').trim().split(/\r?\n/), ['.clang-format', '.gitignore', 'src/recovered.cpp', 'src/shared [1].h', 'windhawk-amalgamation.json']);
+    assert.equal(gitRun('diff', '--cached', '--name-only').trim(), '');
+    assert.equal(gitRun('log', '-1', '--format=%s').trim(), 'Initialize WHAM project');
+    assert.equal(gitRun('status', '--porcelain').trim(), '?? unrelated.txt');
+    const head = gitRun('rev-parse', 'HEAD');
+    await assert.rejects(createInitialCommit(project, [], git), /already has a commit/);
+    assert.equal(gitRun('rev-parse', 'HEAD'), head);
+    await fs.mkdir(path.join(root, 'nested'));
+    const nested = await setupProject(path.join(root, 'nested'), { git }); assert.equal(nested.gitInitialized, false);
+    await assert.rejects(createInitialCommit(nested, [], git), /new project repository/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('initial commit reports missing identity without changing Git identity or removing setup', async () => {
+  const root = path.resolve('work', 'commit-identity-' + Date.now()), git = process.env.WHAM_TEST_GIT || 'git';
+  await fs.mkdir(root, { recursive: true });
+  try {
+    const project = await setupProject(root, { git });
+    for (const key of ['user.name', 'user.email']) execFileSync(git, ['-C', root, 'config', key, ''], { stdio: 'pipe' });
+    await assert.rejects(createInitialCommit(project, [], git));
+    for (const key of ['user.name', 'user.email']) assert.equal(execFileSync(git, ['-C', root, 'config', '--get', key], { encoding: 'utf8' }).trim(), '');
+    assert.ok((await fs.stat(path.join(root, 'windhawk-amalgamation.json'))).isFile());
+    assert.ok((await gitStatus(root, git)).changes > 0);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

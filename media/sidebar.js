@@ -4,7 +4,7 @@ const projectSelect = document.getElementById('project');
 const form = document.getElementById('config');
 const editorForm = document.getElementById('editor-config');
 const previousView = vscode.getState();
-let state = { projects: [] }, currentRoot, configurationDirty = false, editorDirty = false;
+let state = { projects: [], projectChoices: [] }, currentRoot, configurationDirty = false, editorDirty = false;
 let pageName = previousView?.page, settingsPage = previousView?.settings || 'editor', selectedEntry = previousView?.entry;
 let settingUp = false, setupRoot;
 const send = (action, extra = {}) => vscode.postMessage({ action, root: currentRoot, ...extra });
@@ -15,12 +15,13 @@ document.querySelectorAll('[data-settings]').forEach(button => button.addEventLi
 document.querySelectorAll('[data-mode]').forEach(button => button.addEventListener('click', () => {
   settingUp = true; setupRoot = currentRoot;
   document.getElementById('setup-status').textContent = 'Continue setup in the VS Code prompts.';
-  send('initialize', { mode: button.dataset.mode, openProject: document.getElementById('open-after-setup').checked });
+  send('initialize', { mode: button.dataset.mode, openProject: document.getElementById('open-after-setup').checked, initialCommit: document.getElementById('initial-commit').checked });
 }));
 projectSelect.addEventListener('change', () => {
-  currentRoot = projectSelect.value; configurationDirty = false; editorDirty = false; selectedEntry = undefined;
-  document.getElementById('settings-status').textContent = ''; document.getElementById('editor-status').textContent = '';
-  send('select'); render();
+  const projectRoot = projectSelect.value;
+  send('openProject', projectRoot ? { projectRoot } : { browse: true });
+  // Keep the active selection if browsing is cancelled or opening fails.
+  projectSelect.value = currentRoot || '';
 });
 editorForm.addEventListener('input', () => { editorDirty = true; document.getElementById('editor-status').textContent = 'Unapplied editor settings'; });
 editorForm.addEventListener('submit', event => {
@@ -49,8 +50,10 @@ for (const [id, section] of [['edit-metadata', 'metadata'], ['edit-readme', 'rea
 
 function render() {
   projectSelect.replaceChildren();
-  for (const project of state.projects) {
-    const option = document.createElement('option'); option.value = project.root; option.textContent = project.name; option.title = project.root;
+  for (const choice of state.projectChoices) {
+    const option = document.createElement('option'); option.value = choice.root; option.title = choice.detail;
+    const duplicateName = choice.root && state.projectChoices.filter(other => other.label === choice.label).length > 1;
+    option.textContent = duplicateName ? `${choice.label} — ${choice.detail}` : choice.label;
     projectSelect.append(option);
   }
   const project = state.projects.find(project => project.root === currentRoot) || state.projects[0];
@@ -131,14 +134,25 @@ function render() {
 window.addEventListener('message', event => {
   if (event.data.type === 'state') {
     const firstState = !state.type;
+    const previousRoot = currentRoot;
     state = event.data; currentRoot = state.selected;
+    if (previousRoot !== currentRoot) {
+      configurationDirty = false; editorDirty = false; selectedEntry = undefined;
+      document.getElementById('settings-status').textContent = ''; document.getElementById('editor-status').textContent = '';
+    }
     if (firstState) pageName = previousView?.page || (currentRoot ? 'project' : 'setup');
-    if (firstState) document.getElementById('open-after-setup').checked = state.openAfterSetup !== false;
+    if (firstState) {
+      document.getElementById('open-after-setup').checked = state.openAfterSetup !== false;
+      document.getElementById('initial-commit').checked = state.createInitialCommit === true;
+    }
     if (settingUp && currentRoot && currentRoot !== setupRoot) { settingUp = false; pageName = 'project'; configurationDirty = false; editorDirty = false; }
     render();
   }
   if (event.data.type === 'error') { document.getElementById('error').textContent = event.data.message; document.getElementById('setup-status').textContent = ''; settingUp = false; }
-  if (event.data.type === 'setupFinished') { settingUp = false; document.getElementById('setup-status').textContent = ''; }
+  if (event.data.type === 'setupFinished') {
+    settingUp = false; document.getElementById('setup-status').textContent = '';
+    if (event.data.completed && currentRoot) { pageName = 'project'; configurationDirty = false; editorDirty = false; render(); }
+  }
   if (event.data.type === 'saved') { configurationDirty = false; document.getElementById('settings-status').textContent = 'Configuration saved'; render(); }
   if (event.data.type === 'editorSaved') { editorDirty = false; document.getElementById('editor-status').textContent = 'Editor settings applied'; render(); }
   if (event.data.type === 'installation') { editorForm.elements.namedItem('installationPath').value = event.data.value; editorDirty = true; document.getElementById('editor-status').textContent = 'Unapplied editor settings'; }

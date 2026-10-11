@@ -62,19 +62,41 @@ export async function gitStatus(root: string, git = 'git'): Promise<{ branch: st
 }
 
 /** Initialize Git only when no enclosing repository exists, then append managed ignore rules. */
-export async function setupProject(root: string, options: { initializeGit?: boolean; ignoreOutput?: boolean; git?: string } = {}): Promise<Project> {
+export async function setupProject(root: string, options: { initializeGit?: boolean; ignoreOutput?: boolean; git?: string } = {}): Promise<Project & { gitInitialized: boolean }> {
   const project = await initializeProject(root), git = options.git ?? 'git';
+  let gitInitialized = false;
   if (options.initializeGit !== false) {
     let inside = false;
     try { inside = (await run(git, ['-C', root, 'rev-parse', '--is-inside-work-tree'], { windowsHide: true })).stdout.trim() === 'true'; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('Git executable not found. Install Git or configure git.path, then retry setup.'); }
-    if (!inside) await run(git, ['init', root], { windowsHide: true });
+    if (!inside) { await run(git, ['init', root], { windowsHide: true }); gitInitialized = true; }
   }
   await appendIgnoreRules(project, [
     ...(options.ignoreOutput !== false ? [`/${project.config.outputDirectory}/`] : []),
     '/.vscode/settings.json', '/.vscode/c_cpp_properties.json', '/.clangd'
   ]);
-  return project;
+  return { ...project, gitInitialized };
+}
+
+/** Called only after setup creates a repository; commit the explicit setup/source files. */
+export async function createInitialCommit(project: Project, sourceFiles: string[] = [], git = 'git'): Promise<void> {
+  const repository = (await run(git, ['-C', project.root, 'rev-parse', '--show-toplevel'], { windowsHide: true })).stdout.trim();
+  const normalize = (file: string) => process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+  if (normalize(repository) !== normalize(project.root)) throw new Error('Initial commits are limited to the new project repository.');
+  let hasCommit = false;
+  try { await run(git, ['-C', project.root, 'rev-parse', '--verify', 'HEAD'], { windowsHide: true }); hasCommit = true; } catch { /* An unborn branch has no HEAD. */ }
+  if (hasCommit) throw new Error('This repository already has a commit.');
+  const staged = (await run(git, ['-C', project.root, 'diff', '--cached', '--name-only', '-z'], { windowsHide: true })).stdout;
+  if (staged) throw new Error('This repository already has staged changes. Commit them through Source Control.');
+  const files: string[] = [];
+  for (const relative of new Set(['windhawk-amalgamation.json', '.gitignore', '.clang-format', '.vscode/extensions.json', ...sourceFiles])) {
+    const file = await assertSafeDestination(project.root, relative);
+    try { if ((await fs.stat(file)).isFile()) files.push(':(literal)' + relative); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  await run(git, ['-C', project.root, 'add', '--', ...files], { windowsHide: true });
+  // --only keeps unrelated files staged during setup out of this commit.
+  await run(git, ['-C', project.root, 'commit', '--only', '-m', 'Initialize WHAM project', '--', ...files], { windowsHide: true });
 }
 
 export async function appendIgnoreRules(project: Project, rules: string[]): Promise<void> {

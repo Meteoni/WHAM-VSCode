@@ -8,7 +8,7 @@ import { checksum, generateEntry, restoreSource } from './engine';
 import { assertSafeDestination, commitRestore, initializeProject, inputsUnchanged, loadProject, nodeFiles, writeOutput } from './io';
 import { GenerationResult, Project } from './types';
 import { ModMetadata, parseMetadata } from './metadata';
-import { appendIgnoreRules, editorConfiguration, editorDefaults, EditorSettings, findWindhawk, gitStatus, mergeRecoveries, readEditorSettings, setupProject } from './setup';
+import { appendIgnoreRules, createInitialCommit, editorConfiguration, editorDefaults, EditorSettings, findWindhawk, gitStatus, mergeRecoveries, readEditorSettings, setupProject } from './setup';
 
 interface EntryState {
   path: string; output: string; status: string; result?: GenerationResult; ownedHash?: string; message?: string; metadata?: ModMetadata;
@@ -30,6 +30,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let view: vscode.WebviewView | undefined, selectedRoot: string | undefined, previewId = 0, disposed = false;
   const storedHashes = context.workspaceState.get<Record<string, string>>('outputHashes', {});
   const storedEditors = { ...context.workspaceState.get<Record<string, EditorSettings>>('editorSettings', {}), ...context.globalState.get<Record<string, EditorSettings>>('editorSettings', {}) };
+  let recentProjects = context.globalState.get<string[]>('recentProjects', []).filter(root => typeof root === 'string' && path.isAbsolute(root));
+  const initialCommitEnabled = () => vscode.workspace.getConfiguration('wham').get<boolean>('createInitialCommit', false);
   const openAfterSetup = () => vscode.workspace.getConfiguration('wham').get<boolean>('openProjectAfterSetup', true);
   const gitExecutable = () => vscode.workspace.getConfiguration('git').get<string>('path') || 'git';
   const sameFile = (left: string, right: string) => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
@@ -44,6 +46,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const editorRoot = vscode.window.activeTextEditor?.document.uri.fsPath;
     return projects.get(selectedRoot ?? '') ?? [...projects.values()].find(state => editorRoot && contained(state.project.root, editorRoot)) ?? projects.values().next().value;
   };
+  const projectChoices = () => [
+    ...[...new Set([...recentProjects, ...projects.keys()])].map(root => ({ label: path.basename(root), description: 'Recent project', detail: root, root })),
+    { label: 'Browse for a project folder…', description: '', detail: '', root: '' }
+  ];
   const publish = () => {
     if (disposed) return;
     const state = active();
@@ -51,7 +57,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     status.text = '$(file-code) WHAM: ' + (state?.error ? 'configuration error' : statuses.includes('generating') ? 'generating' : statuses.includes('blocked') ? 'output edits' : statuses.some(value => value !== 'current') ? 'stale' : 'current');
     status.tooltip = state?.project.root ?? 'Initialize a Windhawk project';
     void view?.webview.postMessage({ type: 'state', selected: state?.project.root,
-      openAfterSetup: openAfterSetup(), projects: [...projects.values()].map(item => ({ root: item.project.root, name: path.basename(item.project.root), config: item.project.config, editor: item.editor, git: item.git,
+      openAfterSetup: openAfterSetup(), createInitialCommit: initialCommitEnabled(), projectChoices: projectChoices(), projects: [...projects.values()].map(item => ({ root: item.project.root, name: path.basename(item.project.root), config: item.project.config, editor: item.editor, git: item.git,
         opened: !!vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, item.project.root)),
         error: item.error, retained: item.retained, entries: [...item.entries.values()].map(entry => ({ path: entry.path, label: path.relative(path.join(item.project.root, item.project.config.sourceDirectory), entry.path),
           status: entry.status, message: entry.message, metadata: entry.metadata, output: outputPath(item.project, entry.path), dependencies: entry.result?.dependencies.size ?? 0 })) })) });
@@ -200,15 +206,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }
   };
+  const rememberProject = async (root: string) => {
+    recentProjects = [root, ...recentProjects.filter(previous => !sameFile(previous, root))].slice(0, 15);
+    await context.globalState.update('recentProjects', recentProjects);
+  };
   const addProject = async (root: string) => {
     root = path.resolve(root);
-    if (projects.has(root)) { selectedRoot = root; publish(); return; }
+    const loadedRoot = [...projects.keys()].find(previous => sameFile(previous, root));
+    if (loadedRoot) { selectedRoot = loadedRoot; await rememberProject(loadedRoot); publish(); return; }
     const savedEditor = Object.entries(storedEditors).reverse().find(([key]) => sameFile(key, root))?.[1];
     const state: ProjectState = { project: { root, config: { ...defaults } }, entries: new Map(), queue: Promise.resolve(), pending: new Set(), retained: [], editor: await readEditorSettings(root, savedEditor ?? editorDefaults) };
     projects.set(root, state);
     const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '**/*'));
     context.subscriptions.push(watcher, watcher.onDidChange(uri => changed(uri.fsPath)), watcher.onDidCreate(uri => changed(uri.fsPath)), watcher.onDidDelete(uri => changed(uri.fsPath)));
-    try { await refresh(state); if (state.project.config.generate === 'onSave') void enqueue(state); }
+    try { await refresh(state); await rememberProject(root); if (state.project.config.generate === 'onSave') void enqueue(state); }
     catch (error) { state.error = String(error); }
     publish();
   };
@@ -220,7 +231,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     try { await fs.stat(output); } catch { actual = virtual('missing.wh.cpp', ''); }
     await vscode.commands.executeCommand('vscode.diff', actual, virtual(path.basename(output), result.bytes), 'Existing output ↔ Expected from saved source');
   };
-  const restore = async (container?: string, openProject = openAfterSetup()) => {
+  const finishInitialCommit = async (state: ProjectState, sourceFiles: string[]) => {
+    try {
+      await createInitialCommit(state.project, sourceFiles, gitExecutable());
+      log.appendLine('Created initial commit: ' + state.project.root);
+    } catch (error) {
+      log.appendLine(String(error));
+      void vscode.window.showWarningMessage('Project is ready, but the initial commit failed. Check your Git name/email and the WHAM log. Setup files may remain staged.', 'Show log').then(choice => { if (choice === 'Show log') log.show(); });
+    }
+    state.git = await gitStatus(state.project.root, gitExecutable()); publish();
+  };
+  const restore = async (container?: string, openProject = openAfterSetup(), initialCommit = initialCommitEnabled()) => {
     const containers = container ? [container] : (await vscode.window.showOpenDialog({ canSelectMany: true, filters: { 'Windhawk source': ['cpp'] }, openLabel: 'Recover selected mods' }))?.map(uri => uri.fsPath);
     if (!containers?.length) return;
     for (const file of containers) if (vscode.workspace.textDocuments.some(document => sameFile(document.uri.fsPath, file) && document.isDirty)) throw new Error('Save generated outputs before restoring their edits.');
@@ -270,18 +291,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (differences.length && await vscode.window.showWarningMessage(`Overwrite ${differences.length} differing file(s) in ${destination}?\n${differences.join('\n')}`, { modal: true }, 'Overwrite Reviewed Files') !== 'Overwrite Reviewed Files') return;
     for (const file of contents.keys()) if (vscode.workspace.textDocuments.some(document => sameFile(document.uri.fsPath, path.join(destination, file)) && document.isDirty)) throw new Error(`Destination became dirty: ${file}`);
     await commitRestore(result, destination, selections, differences.length > 0);
-    await setupProject(destination, { git: gitExecutable() });
+    const setup = await setupProject(destination, { git: gitExecutable() });
     await addProject(destination); selectedRoot = destination; publish();
     await configureEditor(projects.get(destination)!);
+    if (initialCommit && setup.gitInitialized) await finishInitialCommit(projects.get(destination)!, [...result.files.keys()]);
     if (openProject && !vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, destination))) await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(destination), false);
     else void vscode.window.showInformationMessage(`Recovered ${result.files.size} source files in ${destination}`);
+    return true;
   };
-  const initialize = async (requestedMode?: string, openProject = openAfterSetup()) => {
-    const modes = ['Create a new project', 'Use an existing project', 'Recover one or more .wh.cpp files'];
+  const refreshRecentProjects = async () => {
+    const available: string[] = [];
+    for (const root of recentProjects) {
+      try { if ((await fs.stat(path.join(root, 'windhawk-amalgamation.json'))).isFile()) available.push(root); }
+      catch { /* The folder or its project configuration may have been removed. */ }
+    }
+    recentProjects = available; await context.globalState.update('recentProjects', recentProjects);
+  };
+  const openExistingProject = async (requestedRoot?: string, browse = false): Promise<boolean> => {
+    await refreshRecentProjects(); publish();
+    const choices = projectChoices();
+    let root = requestedRoot;
+    if (root && !choices.some(choice => sameFile(choice.root, root!))) throw new Error('This project is no longer available. Browse to its new location.');
+    if (!root && !browse && choices.some(choice => choice.root)) {
+      const choice = await vscode.window.showQuickPick(choices, { title: 'Open WHAM project', matchOnDetail: true });
+      if (!choice) return false;
+      root = choice.root;
+    }
+    if (!root) root = (await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select your source project' }))?.[0].fsPath;
+    if (!root) return false;
+    root = path.resolve(root);
+    let configured = false;
+    try { configured = (await fs.stat(path.join(root, 'windhawk-amalgamation.json'))).isFile(); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    // Opening an existing WHAM project never rewrites its editor or Git configuration.
+    if (configured) await loadProject(root);
+    else {
+      await setupProject(root, { git: gitExecutable() });
+      void vscode.window.showInformationMessage('WHAM project created. Configure the compiler and indentation in Settings → Editor when needed.');
+    }
+    await addProject(root); selectedRoot = root; publish();
+    if (!vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, root))) await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(root), false);
+    return true;
+  };
+  const initialize = async (requestedMode?: string, openProject = openAfterSetup(), initialCommit = initialCommitEnabled()) => {
+    const modes = ['Create a new project', 'Open an existing project', 'Recover one or more .wh.cpp files'];
+    if (requestedMode === 'Use an existing project') requestedMode = 'Open an existing project';
     const mode = modes.includes(requestedMode ?? '') ? requestedMode : await vscode.window.showQuickPick(modes, { title: 'Set up WHAM' });
     if (!mode) return;
-    if (mode.startsWith('Recover')) { await restore(undefined, openProject); return; }
-    const folders = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: mode.startsWith('Create') ? 'Select an empty folder or parent directory' : 'Select existing project' });
+    if (mode.startsWith('Open')) return openExistingProject();
+    if (mode.startsWith('Recover')) return restore(undefined, openProject, initialCommit);
+    const folders = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Select an empty folder or parent directory' });
     if (!folders?.[0]) return;
     let root = folders[0].fsPath;
     if (mode.startsWith('Create')) {
@@ -290,15 +349,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (choice.startsWith('Create')) {
         const name = await vscode.window.showInputBox({ title: 'New project folder', value: 'windhawk-mods', validateInput: value => !value || /[\\/:*?"<>|]/.test(value) || ['.', '..'].includes(value) ? 'Enter one directory name.' : undefined });
         if (!name) return; root = path.join(root, name);
-        try { await fs.stat(root); throw new Error('That directory already exists. Choose Use an existing project.'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        try { await fs.stat(root); throw new Error('That directory already exists. Choose Open project.'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         await fs.mkdir(root);
-      } else if ((await fs.readdir(root)).length) throw new Error('This folder is not empty. Choose Use an existing project.');
+      } else if ((await fs.readdir(root)).length) throw new Error('This folder is not empty. Choose Open project.');
     }
-    await setupProject(root, { git: gitExecutable() }); await addProject(root); selectedRoot = root;
+    const setup = await setupProject(root, { git: gitExecutable() }); await addProject(root); selectedRoot = root;
     await context.workspaceState.update('additionalRoots', [...projects.keys()].filter(root => !vscode.workspace.workspaceFolders?.some(folder => folder.uri.fsPath === root))); publish();
     await configureEditor(projects.get(root)!);
+    if (initialCommit && setup.gitInitialized) await finishInitialCommit(projects.get(root)!, []);
     if (openProject && !vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, root))) await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(root), false);
     else void vscode.window.showInformationMessage(`Project ready: ${root}`);
+    return true;
   };
   const applyEditor = async (state: ProjectState, settings: EditorSettings) => {
     const files = await editorConfiguration(state.project, settings);
@@ -404,7 +465,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   const safe = (operation: () => Promise<unknown>) => async () => { try { await operation(); } catch (error) { log.appendLine(String(error)); void vscode.window.showErrorMessage((error as Error).message); } };
   const register = (name: string, operation: () => Promise<unknown>) => context.subscriptions.push(vscode.commands.registerCommand('windhawk.' + name, safe(operation)));
-  register('initialize', initialize); register('restore', () => restore()); register('logs', async () => log.show());
+  register('initialize', initialize); register('openProject', openExistingProject); register('restore', () => restore()); register('logs', async () => log.show());
   register('configureEditor', async () => { const state = active(); if (state) await configureEditor(state); });
   register('generateAll', async () => { const state = active(); if (state && await saveRelevant(state)) await enqueue(state); });
   register('generateCurrent', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state, true); if (entry && await saveRelevant(state)) await enqueue(state, [entry.path]); });
@@ -425,11 +486,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           <h1>Set up your project</h1><p class="muted">Work in separate source files. Generate standalone mods with recoverable source.</p>
           <div class="setup-options">
             <button data-mode="Create a new project"><strong>New project</strong><span>Choose an empty folder or create a named folder. WHAM sets up src, output, and Git.</span></button>
-            <button data-mode="Use an existing project"><strong>Existing project</strong><span>Select your source project. Review editor changes before applying them.</span></button>
+            <button data-mode="Open an existing project"><strong>Existing project</strong><span>Select your source project or reopen one from the recent projects list.</span></button>
             <button data-mode="Recover one or more .wh.cpp files"><strong>Recover mods</strong><span>Reconstruct a project from one or more WHAM outputs, including shared headers.</span></button>
           </div>
           <label class="checkbox"><input id="open-after-setup" type="checkbox" checked> Open project after setup</label>
           <p class="muted">Opening the folder activates its C++ configuration in this window. VS Code handles any unsaved files.</p>
+          <label class="checkbox"><input id="initial-commit" type="checkbox"> Create initial Git commit</label>
+          <p class="muted">For new and recovered projects when WHAM creates the repository. Uses your existing Git name and email.</p>
           <p id="setup-status" role="status"></p>
         </section>
         <section id="page-project" hidden>
@@ -482,10 +545,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       context.subscriptions.push(view.webview.onDidReceiveMessage(async message => {
         try {
           if (!message || typeof message.action !== 'string') return;
-          if (message.action === 'ready') { publish(); return; }
+          if (message.action === 'ready') { await refreshRecentProjects(); publish(); return; }
+          if (message.action === 'openProject') { await openExistingProject(typeof message.projectRoot === 'string' ? message.projectRoot : undefined, message.browse === true); return; }
           if (message.action === 'initialize') {
-            await initialize(message.mode, typeof message.openProject === 'boolean' ? message.openProject : openAfterSetup());
-            await view?.webview.postMessage({ type: 'setupFinished' }); return;
+            const completed = await initialize(message.mode, typeof message.openProject === 'boolean' ? message.openProject : openAfterSetup(),
+              typeof message.initialCommit === 'boolean' ? message.initialCommit : initialCommitEnabled());
+            await view?.webview.postMessage({ type: 'setupFinished', completed }); return;
           }
           if (message.action === 'logs') { log.show(); return; }
           const state = projects.get(message.root);
@@ -508,7 +573,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             const install = selected === 'Browse…' ? (await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false }))?.[0].fsPath : selected;
             if (install) await view?.webview.postMessage({ type: 'installation', value: install }); return;
           }
-          if (message.action === 'select') { publish(); return; }
+          if (message.action === 'select') { await rememberProject(state.project.root); publish(); return; }
           if (message.action === 'config') { await updateConfig(state, message.config); await view?.webview.postMessage({ type: 'saved' }); return; }
           if (message.action === 'generateAll') { if (await saveRelevant(state)) await enqueue(state); return; }
           if (!entry) throw new Error('Select a valid mod entry.');
@@ -541,14 +606,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       presentDiagnostics(); publish();
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(event => { for (const folder of event.added) if (folder.uri.scheme === 'file') void addProject(folder.uri.fsPath); for (const folder of event.removed) projects.delete(folder.uri.fsPath); publish(); }),
+    vscode.workspace.onDidChangeWorkspaceFolders(event => {
+      for (const folder of event.added) if (folder.uri.scheme === 'file') void fs.stat(path.join(folder.uri.fsPath, 'windhawk-amalgamation.json')).then(() => addProject(folder.uri.fsPath)).catch(error => log.appendLine(String(error)));
+      for (const folder of event.removed) projects.delete(folder.uri.fsPath);
+      publish();
+    }),
     { dispose() { disposed = true; for (const state of projects.values()) if (state.timer) clearTimeout(state.timer); } }
   );
   for (const folder of vscode.workspace.workspaceFolders ?? []) if (folder.uri.scheme === 'file') {
     try { await fs.stat(path.join(folder.uri.fsPath, 'windhawk-amalgamation.json')); await addProject(folder.uri.fsPath); } catch { /* Initialize explicitly if no config exists. */ }
   }
   for (const root of context.workspaceState.get<string[]>('additionalRoots', [])) {
-    try { await fs.stat(root); await addProject(root); } catch { /* A detached project may have moved. */ }
+    try { await fs.stat(path.join(root, 'windhawk-amalgamation.json')); await addProject(root); } catch { /* A detached project may have moved. */ }
   }
   publish();
 }

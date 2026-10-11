@@ -2,7 +2,7 @@
   "name": "windhawk-amalgamation",
   "displayName": "WHAM: Windhawk Source Amalgamation",
   "description": "Build standalone Windhawk mods and recover their editable source trees, with per-project sidebar controls.",
-  "version": "1.1.2",
+  "version": "1.2.2",
   "publisher": "windhawk-tools",
   "license": "MIT AND GPL-3.0-only",
   "engines": { "vscode": "^1.95.0", "node": ">=20" },
@@ -23,6 +23,7 @@
     "configuration": {
       "title": "WHAM",
       "properties": {
+        "wham.createInitialCommit": { "type": "boolean", "default": false, "description": "Create an initial commit after new/recovered project setup, only if WHAM initializes the repository. Uses your configured Git identity." },
         "wham.openProjectAfterSetup": { "type": "boolean", "default": true, "description": "Open the initialized or recovered project in the current window after setup so its editor configuration is active." }
       }
     },
@@ -35,6 +36,7 @@
       "embeddedLanguages": { "meta.embedded.block.yaml": "yaml", "meta.embedded.block.markdown": "markdown" }
     }],
     "commands": [
+      { "command": "windhawk.openProject", "title": "WHAM: Open Project" },
       { "command": "windhawk.initialize", "title": "WHAM: Initialize Project" },
       { "command": "windhawk.configureEditor", "title": "WHAM: Configure Compiler and Indentation" },
       { "command": "windhawk.generateAll", "title": "WHAM: Generate All Mods" },

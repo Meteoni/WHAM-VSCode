@@ -39,7 +39,12 @@ const { parse } = require('jsonc-parser');
     const config = { formatVersion: 1, sourceDirectory: 'src', outputDirectory: 'output', entries: ['**/*.cpp'], exclude: [], includeDirectories: ['src'], externalIncludes: [], generate: 'onSave', debounceMs: 250, inlineAngleIncludes: false };
     const metadata = parseMetadata(await fs.readFile('examples/demo/src/demo.cpp', 'utf8'), 'demo.cpp');
     metadata.readme += '\n<script>window.hacked = true</script>';
-    const state = { type: 'state', openAfterSetup: true, selected: root, projects: [{ root, name: 'Windhawk', opened: true, config,
+    const choices = [
+      { label: 'Windhawk', detail: root, root },
+      { label: 'Recent mod', detail: 'C:/Recent', root: 'C:/Recent' },
+      { label: 'Browse for a project folder…', detail: '', root: '' }
+    ];
+    const state = { type: 'state', openAfterSetup: true, selected: root, projectChoices: choices, projects: [{ root, name: 'Windhawk', opened: true, config,
       editor: { installationPath: 'C:/Windhawk', integration: 'cpp', indentStyle: 'spaces', indentSize: 4 }, git: { branch: 'main', changes: 2 }, retained: [], entries: [
         { path: root + '\\src\\demo.cpp', label: 'demo.cpp', status: 'current', message: '3 source file(s)', metadata },
         { path: root + '\\src\\tools\\second.cpp', label: 'tools/second.cpp', status: 'blocked', message: 'Output was edited. Compare or restore its edits.', metadata: parseMetadata(await fs.readFile('examples/demo/src/tools/second.cpp', 'utf8'), 'second.cpp') }
@@ -63,10 +68,34 @@ const { parse } = require('jsonc-parser');
     assert.ok(await page.locator('#page-setup').isVisible()); assert.ok(await page.locator('#page-project').isHidden()); assert.ok(await page.locator('#page-settings').isHidden());
     assert.ok(await page.locator('[data-page="settings"]').isDisabled());
     await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-setup-${version}.png`), fullPage: true });
-    await page.locator('#open-after-setup').uncheck(); await page.locator('[data-mode="Create a new project"]').click();
-    const setupMessage = await page.evaluate(() => window.sent.at(-1)); assert.equal(setupMessage.mode, 'Create a new project'); assert.equal(setupMessage.openProject, false);
+    const wideCards = await page.locator('.setup-options button').evaluateAll(buttons => buttons.map(button => button.getBoundingClientRect().height));
+    await page.setViewportSize({ width: 240, height: 900 });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    const narrowCards = await page.locator('.setup-options button').evaluateAll(buttons => buttons.map(button => button.getBoundingClientRect().height));
+    assert.ok(narrowCards.every((height, index) => height > wideCards[index]), 'Setup cards adapt to wrapped descriptions');
+    await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-setup-narrow-${version}.png`), fullPage: true });
+    await page.setViewportSize({ width: 380, height: 900 });
+    await page.locator('#open-after-setup').uncheck(); await page.locator('#initial-commit').check(); await page.locator('[data-mode="Create a new project"]').click();
+    const setupMessage = await page.evaluate(() => window.sent.at(-1)); assert.equal(setupMessage.mode, 'Create a new project'); assert.equal(setupMessage.openProject, false); assert.equal(setupMessage.initialCommit, true);
+    await page.locator('[data-mode="Open an existing project"]').click();
+    assert.equal((await page.evaluate(() => window.sent.at(-1))).mode, 'Open an existing project');
     await page.evaluate(state => window.dispatchEvent(new MessageEvent('message', { data: state })), state);
-    assert.ok(await page.locator('#page-project').isVisible()); assert.equal(await page.locator('article').count(), 2);
+    assert.ok(await page.locator('#page-project').isVisible());
+    assert.ok(await page.locator('#project').isVisible()); assert.equal(await page.locator('#project option:checked').textContent(), 'Windhawk');
+    assert.equal(await page.locator('[data-action="openProject"]').count(), 0);
+    assert.deepEqual(await page.locator('#project option').allTextContents(), choices.map(choice => choice.label));
+    await page.locator('#project').selectOption('C:/Recent');
+    const recentMessage = await page.evaluate(() => window.sent.at(-1));
+    assert.equal(recentMessage.action, 'openProject'); assert.equal(recentMessage.projectRoot, 'C:/Recent');
+    assert.equal(await page.locator('#project').inputValue(), root);
+    await page.locator('#project').selectOption('');
+    const browseMessage = await page.evaluate(() => window.sent.at(-1)); assert.equal(browseMessage.action, 'openProject'); assert.equal(browseMessage.browse, true);
+    assert.equal(await page.locator('#project').inputValue(), root);
+    const multiple = { ...state, projectChoices: [...choices.slice(0, -1), { label: 'Other', detail: 'C:/Other', root: 'C:/Other' }, choices.at(-1)], projects: [...state.projects, { ...state.projects[0], root: 'C:/Other', name: 'Other' }] };
+    await page.evaluate(state => window.dispatchEvent(new MessageEvent('message', { data: state })), multiple);
+    assert.ok(await page.locator('#project').isVisible()); assert.equal(await page.locator('#project option').count(), 4);
+    await page.evaluate(state => window.dispatchEvent(new MessageEvent('message', { data: state })), state);
+    assert.equal(await page.locator('article').count(), 2);
     assert.equal(await page.locator('article .link').first().textContent(), metadata.fields.name[0]);
     await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-project-${version}.png`), fullPage: true });
     await page.getByRole('button', { name: 'Generate all', exact: true }).click(); assert.equal((await page.evaluate(() => window.sent.at(-1))).action, 'generateAll');

@@ -1,5 +1,21 @@
 # Changes
 
+## 1.2.2
+
+- Use the same project list in the Active project dropdown and Setup picker, including recent projects and Browse.
+- Remove the duplicate Open project button from the Project page.
+
+## 1.2.1
+
+- Keep the Active project dropdown visible when only one project is loaded.
+
+## 1.2.0
+
+- Open recent projects from Setup or the Project page, or browse for another source folder.
+- Open existing WHAM projects without editor setup or review prompts.
+- Show the active project name when only one project is loaded.
+- Optionally create an initial Git commit for new and recovered projects when WHAM creates the repository. Preserve existing repositories and staged changes.
+
 ## 1.1.2
 
 - Reserve vertical scrollbar space so the longer Generation settings screen does not shrink either navigation row.

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const Module = require('node:module');
+const { execFileSync } = require('node:child_process');
 const { defaults } = require('../dist/config');
 const { restoreSource } = require('../dist/engine');
 
@@ -66,7 +67,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     };
     const project = () => messages.filter(message => message.type === 'state').at(-1)?.projects[0];
     await settle(() => project()?.entries.every(entry => entry.status === 'current'));
-    assert.equal(commands.size, 9); assert.equal(project().entries.length, 2);
+    assert.equal(commands.size, 10); assert.equal(project().entries.length, 2);
     assert.equal(project().editor.installationPath, path.join(root, 'installation')); assert.equal(project().editor.indentSize, 2); assert.equal(project().editor.indentStyle, 'tabs');
     assert.match(project().entries[0].metadata.diagnostics[0].message, /No Windhawk/);
     const one = path.join(root, 'src/one.cpp'), oneOutput = path.join(root, 'output/one.wh.cpp'), twoOutput = path.join(root, 'output/two.wh.cpp');
@@ -131,8 +132,101 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     };
     await receive({ action: 'initialize', mode: 'Create a new project', openProject: true });
     assert.equal(opened.length, 1); assert.equal(opened[0][1].fsPath, newRoot); assert.equal(opened[0][2], false);
-    await receive({ action: 'initialize', mode: 'Use an existing project', openProject: false });
-    assert.equal(opened.length, 1);
+    assert.equal(globalStored.recentProjects[0], newRoot);
+    // Opening existing projects performs no editor review or Git writes.
+    const beforeSettings = await fs.readFile(path.join(newRoot, '.vscode/settings.json'));
+    const beforeIgnore = await fs.readFile(path.join(newRoot, '.gitignore'));
+    const pickerTitles = [];
+    mock.window.showQuickPick = async (choices, options) => {
+      pickerTitles.push(options.title);
+      assert.ok(choices.some(choice => choice.label === 'Browse for a project folder…'));
+      assert.equal(choices[0].detail, newRoot);
+      return choices[0];
+    };
+    await receive({ action: 'initialize', mode: 'Open an existing project', openProject: false });
+    assert.equal(opened.length, 2); assert.deepEqual(pickerTitles, ['Open WHAM project']);
+    assert.deepEqual(await fs.readFile(path.join(newRoot, '.vscode/settings.json')), beforeSettings);
+    assert.deepEqual(await fs.readFile(path.join(newRoot, '.gitignore')), beforeIgnore);
+    const dropdownChoices = messages.filter(message => message.type === 'state').at(-1).projectChoices;
+    const beforeOpenCount = opened.length;
+    mock.window.showQuickPick = async () => { throw new Error('Dropdown selection must not show another picker'); };
+    await receive({ action: 'openProject', projectRoot: newRoot });
+    assert.equal(opened.length, beforeOpenCount + 1);
+    assert.equal(opened.at(-1)[1].fsPath, newRoot);
+    assert.equal(dropdownChoices.at(-1).label, 'Browse for a project folder…');
+    assert.equal(dropdownChoices[0].root, newRoot);
+    // Cold boot uses global history, without loading recent folders as active projects.
+    for (const subscription of context.subscriptions.splice(0)) subscription.dispose();
+    mock.workspace.workspaceFolders = []; delete stored.additionalRoots;
+    const movedRoot = path.join(root, 'moved-project');
+    globalStored.recentProjects.push(movedRoot);
+    await extension.activate(context);
+    provider.resolveWebviewView({ webview: { cspSource: 'test-resource:', asWebviewUri: uri => uri.toString(), postMessage: async message => { messages.push(message); }, onDidReceiveMessage(fn) { receive = fn; return disposable(); } } });
+    assert.equal(messages.filter(message => message.type === 'state').at(-1).projects.length, 0);
+    mock.commands.executeCommand = async (...args) => { if (args[0] === 'vscode.openFolder') opened.push(args); };
+    mock.window.showQuickPick = async choices => { assert.deepEqual(choices, dropdownChoices); return choices[0]; };
+    await commands.get('windhawk.openProject')();
+    assert.equal(opened.at(-1)[1].fsPath, newRoot);
+    assert.ok(!globalStored.recentProjects.includes(movedRoot));
+    // Recovery can create an initial commit, but never commits into an existing repo.
+    const recoveredRoot = path.join(root, 'recovered-project'); await fs.mkdir(recoveredRoot);
+    const git = process.env.WHAM_TEST_GIT || 'git';
+    const gitRun = (...args) => execFileSync(git, ['-C', recoveredRoot, ...args], { encoding: 'utf8', stdio: 'pipe' });
+    mock.window.showOpenDialog = async options => [Uri.file(options.filters ? twoOutput : recoveredRoot)];
+    mock.window.showQuickPick = async choices => {
+      if (choices[0]?.label === 'Write reconstructed tree') return choices[0];
+      if (choices.includes('Use this existing directory')) return 'Use this existing directory';
+      if (choices.includes('Configure indentation only')) {
+        gitRun('config', 'user.name', 'WHAM Test'); gitRun('config', 'user.email', 'wham-test@example.invalid');
+        gitRun('config', 'commit.gpgsign', 'false'); gitRun('config', 'core.hooksPath', path.join(recoveredRoot, 'empty-hooks'));
+        return 'Configure indentation only';
+      }
+      return '2 spaces';
+    };
+    await receive({ action: 'initialize', mode: 'Recover one or more .wh.cpp files', openProject: false, initialCommit: true });
+    const recoveredHead = gitRun('rev-parse', 'HEAD');
+    assert.ok(gitRun('ls-tree', '-r', '--name-only', 'HEAD').includes('src/shared.h'));
+    assert.equal(gitRun('status', '--porcelain').trim(), '');
+    assert.equal(globalStored.recentProjects[0], recoveredRoot);
+    await fs.writeFile(path.join(recoveredRoot, 'user.txt'), 'user staged changes'); gitRun('add', 'user.txt');
+    mock.window.showQuickPick = async choices => choices[0]?.label === 'Write reconstructed tree' ? choices[0] : choices.includes('Use this existing directory') ? 'Use this existing directory' : 'Skip editor setup for now';
+    await receive({ action: 'initialize', mode: 'Recover one or more .wh.cpp files', openProject: false, initialCommit: true });
+    assert.equal(gitRun('rev-parse', 'HEAD'), recoveredHead);
+    assert.equal(gitRun('diff', '--cached', '--name-only').trim(), 'user.txt');
+    // A failed initial commit still opens a fully configured new project.
+    const failedRoot = path.join(root, 'failed-commit'); await fs.mkdir(failedRoot);
+    const warnings = [];
+    mock.window.showWarningMessage = async message => { warnings.push(message); };
+    mock.window.showOpenDialog = async () => [Uri.file(failedRoot)];
+    mock.window.showQuickPick = async choices => {
+      if (choices.includes('Use this empty folder')) return 'Use this empty folder';
+      if (choices.includes('Configure indentation only')) {
+        for (const key of ['user.name', 'user.email']) execFileSync(git, ['-C', failedRoot, 'config', key, ''], { stdio: 'pipe' });
+        return 'Configure indentation only';
+      }
+      return '2 spaces';
+    };
+    await receive({ action: 'initialize', mode: 'Create a new project', openProject: true, initialCommit: true });
+    assert.equal(opened.at(-1)[1].fsPath, failedRoot);
+    assert.match(warnings.at(-1), /initial commit failed/);
+    assert.equal(globalStored.editorSettings[failedRoot].indentSize, 2);
+    // Browsing a plain source project adds WHAM config, without editor prompts.
+    const plainRoot = path.join(root, 'plain-project'); await fs.mkdir(plainRoot);
+    mock.window.showQuickPick = async choices => choices.find(choice => choice.label === 'Browse for a project folder…');
+    mock.window.showOpenDialog = async () => [Uri.file(plainRoot)];
+    mock.window.showQuickPick = async () => { throw new Error('Browse must open the folder dialog directly'); };
+    await receive({ action: 'openProject', browse: true });
+    assert.ok((await fs.stat(path.join(plainRoot, 'windhawk-amalgamation.json'))).isFile());
+    await assert.rejects(fs.stat(path.join(plainRoot, '.vscode/settings.json')), /ENOENT/);
+    assert.equal(opened.at(-1)[1].fsPath, plainRoot);
+    assert.equal(globalStored.recentProjects[0], plainRoot);
+    // With no recent history, opening goes straight to a folder picker.
+    for (const subscription of context.subscriptions.splice(0)) subscription.dispose();
+    globalStored.recentProjects = []; delete stored.additionalRoots;
+    mock.window.showQuickPick = async () => { throw new Error('Unexpected setup/recent picker'); };
+    await extension.activate(context);
+    await commands.get('windhawk.openProject')();
+    assert.equal(globalStored.recentProjects[0], plainRoot);
   } finally {
     for (const subscription of context.subscriptions) subscription.dispose();
     await fs.rm(root, { recursive: true, force: true });

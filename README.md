@@ -10,7 +10,9 @@ Write a Windhawk mod across several C++ files, then generate a single `.wh.cpp` 
 
 1. Install the WHAM `.vsix` through **Extensions: Install from VSIX…** in VS Code.
 2. Open **WHAM** in the activity bar. Choose **New project**, **Existing project**, or **Recover mods**.
-3. Select your Windhawk installation and indentation preferences. Install the recommended C++ language extension if needed.
+3. For new or recovered projects, select your Windhawk installation and indentation. You can change these under **Settings → Editor**.
+
+**Open project** remembers recent folders and opens existing WHAM projects without setup prompts. Browse to select another source folder.
 
 Keep each mod's entry `.cpp` and its local headers under `src/`. WHAM follows the includes and writes one `.wh.cpp` per entry to `output/`.
 
@@ -20,7 +22,7 @@ src/mod.cpp + included headers → output/mod.wh.cpp
 
 Output updates when you save. Use **Generate** for a single mod or **Generate all** for the project. **Settings** controls generation, compiler integration, indentation, and Git ignore rules.
 
-New projects get `src/`, `output/`, configuration, and Git setup. Generated output and local compiler settings are ignored; WHAM doesn't make commits.
+New projects get `src/`, `output/`, configuration, and Git setup. Generated output and local compiler settings are ignored. **Create initial Git commit** is optional for new or recovered repositories; it uses your existing Git identity.
 
 ## Recovery
 
