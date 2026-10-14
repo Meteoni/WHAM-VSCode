@@ -1,0 +1,11 @@
+{
+  "command": "captureHotkey",
+  "type": "reply",
+  "data": {
+    "hotkey": null,
+    "error": {
+      "code": "HOTKEY_CAPTURE_UNAVAILABLE",
+      "message": "hotkey capture: SetWindowsHookExW failed: Access is denied."
+    }
+  }
+}

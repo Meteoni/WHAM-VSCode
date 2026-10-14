@@ -10,7 +10,7 @@ Write a Windhawk mod across several C++ files, then generate a single `.wh.cpp` 
 
 1. Install the WHAM `.vsix` through **Extensions: Install from VSIX…** in VS Code.
 2. Open **WHAM** in the activity bar. Choose **New project**, **Existing project**, or **Recover mods**.
-3. For new or recovered projects, select your Windhawk installation and indentation. You can change these under **Settings → Editor**.
+3. Select your Windhawk installation and indentation. **Extension settings** holds installation and elevation preferences; **Project settings → Editor** holds local project choices and formatting.
 
 **Open project** remembers recent folders and opens existing WHAM projects without setup prompts. Browse to select another source folder.
 
@@ -30,11 +30,15 @@ New projects get `src/`, `output/`, configuration, and Git setup. Generated outp
 
 If you edit generated output, WHAM pauses regeneration so your changes aren't overwritten. Restore those edits to source or explicitly discard them before generating again.
 
-WHAM bundles includes; it doesn't install or activate mods. See the [user guide](docs/guide.md) for configuration, CLI commands, and supported C++ constructs.
+**Compile** generates and installs the current mod in Windhawk, keeping its **Enabled** state. The first build starts disabled. The dropdown offers **Test build** without installing, **Verify syntax** for its declared architectures, and **Stop compilation** while a build is running. Click the mod name to preview its README and default settings in the sidebar. Use the Windhawk icon beside Refresh to open Windhawk and change installed settings.
+
+The preview works without Windhawk. Compilation and installed-mod controls need a compatible Windhawk 2.0 CLI. See the [user guide](docs/guide.md) for configuration, CLI commands, and supported C++ constructs.
+
+Standard Windhawk installs need elevation for compilation and installed-mod changes. Choose **Windows sudo** (may require more prompts) or **gsudo** (once per VS Code session) under **Extension settings**. gsudo is found automatically on PATH when installed. **None** uses VS Code's current permissions. Saving local preferences does not change project files; **Apply editor settings** does.
 
 ## Building
 
-Use Node.js 20 or newer and Git.
+Use Node.js 20 or newer, Git, and Windhawk’s Windows compiler. Set `WINDHAWK_HOME` if its installation isn’t detected.
 
 ```sh
 npm ci
@@ -46,4 +50,4 @@ Packaging creates a `.vsix` in this folder. Press **F5** in VS Code to launch a 
 
 ## License
 
-WHAM's own code is [MIT licensed](LICENSE). The Windhawk icon and adapted syntax grammar are GPLv3; see [third-party notices](THIRD-PARTY-NOTICES.md). WHAM is an independent project.
+WHAM's own code is [MIT licensed](LICENSE). The bundled Windhawk renderer, icon, and adapted syntax grammar are GPLv3; see [third-party notices](THIRD-PARTY-NOTICES.md). WHAM is an independent project.

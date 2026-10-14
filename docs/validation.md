@@ -1,4 +1,64 @@
-# Validation for version 1.1.2
+## 1.5.3 — 2026-10-14
+
+- All 41 regression tests passed. Expanded workflow coverage checks direct editor Apply, non-writing optional Review, dirty-editor protection, direct comparison of two recovery copies, single-mod commands, and no-installation folder browsing. Recovery uses one final replacement action and rejects destination changes made during confirmation.
+- Browser checks passed optional Review submission and existing theme/narrow-layout regressions. A separate VS Code host passed activation, commands, generation, save handling, and output protection. Actual editor setup, indentation, recovery warning, and diff controls were captured in an isolated development window.
+
+## 1.5.1 — 2026-10-14
+
+- All 41 regression tests passed. Compiler fixtures confirm Verify shares per-mod flags and x64/ARM64 targets with Test build, does not link or produce a DLL, and retains cleanup and cancellation.
+- Real Windhawk compiler checks passed syntax-only x86, x64, and ARM64 with a required metadata-defined macro and an unresolved external symbol. Full DLL link tests still pass and reject unresolved symbols. No mod was installed or loaded.
+- Browser checks passed the compact Git lists, narrow widths, and five existing themes. The PNG listing icon is 256×256 and has an editable SVG source.
+
+## 1.5.0 — 2026-10-13
+
+- All 41 Node regression tests passed. Runtime fixtures cover Enabled preservation, temporary build isolation, Stop for all three build actions, successful-build proof, and older CLI gating. Compiler fixtures cover UTF-16 paths, target selection, quoted flags, output redirects, and cleanup on failure.
+- Native x64 checks passed against Windhawk 2.0.0-alpha.7: modern annotation descriptors match the fallback, Windows argv and UTF-8 survive the managed process, cancellation closes the owned child tree, deadlines work, and a temporary DLL links successfully. An unresolved external symbol fails the link. These tests do not install or load a mod.
+- Browser checks cover split-button size/corners/colors, menu actions, Escape and outside click, running Stop, stable tab widths, and five themes. The pinned read-only Draft renders the offline float fixture and retains its async shell, refresh indicator, and narrow layouts.
+- An isolated VS Code development host passed activation, registered commands/sidebar, generation, document-save regeneration, and output-edit protection.
+
+## 1.4.3 freshness checks
+
+The adapter regressions cover independent .cpp edits, shared and nested headers, timestamp-only touches, content edits with preserved timestamps, missing-header creation, manual generation, reopening, and output protection. Runtime tests keep successful compile snapshots separate from Windhawk saved source and detect replacement library identities. Browser checks cover the wrench-and-dot indicator, tooltips, and text-before-switch layout across bundled themes.
+
+# Validation
+
+## 1.4.2 — 2026-10-13
+
+- Toggle tests confirm one enable/disable command with no generation, parsing, source polling, or compilation. Duplicate actions are blocked and failures preserve the confirmed state. Labels reflect Enabled/Disabled and pending toggle operations.
+- Successful builds do not open Output; warnings and errors do. Compile shows a spinner only for its own operation.
+- Browser checks confirm equal 12px navigation insets for the project list and details, with content scrolling below the tabs. Loading and toggle states pass the theme and narrow-width checks.
+- Launcher tests cover windhawk-ui.exe preference, legacy fallback, and direct EACCES failures handled through Windows ShellExecute. Launches/UAC are mocked.
+
+- All 39 Node regression tests passed after separating Draft preparation and runtime polling. Focused checks cover preview/source refresh without installed-state reads, compile/enable without the native parser, scoped source export, missing versus denied configuration reads, and UTF-8 transport.
+- The pinned-renderer browser checks and isolated real VS Code host passed with the existing compact toolbar.
+- Windhawk 2.0.0-alpha.7 passed actual CLI configuration reads and the scoped source-export format. The rebuilt bridge passed stateless parsing and rejects installed-state commands. No installed mods were changed.
+- Both x64 and ARM64 bridges compiled; ARM64 execution remains untested.
+
+
+## 1.4.1 — 2026-10-13
+
+- All 39 Node regression tests passed, including cached project state embedded before returning from details.
+- Browser checks include VS Code's injected body padding and confirm the toolbar keeps its position and width as renderer styles load. At 240px and 340px, controls share one row and height, menus stay in view, and the preview fills the pane directly below the toolbar.
+- Project and Settings restore before any host reply, without showing Setup. The folder Open button passed the existing theme and narrow-layout checks.
+
+## 1.4.0 — 2026-10-13
+
+- All 39 Node regression tests passed, including offline localized settings, older Windhawk previews, beta/RC CLI probes, split UTF-8 output, and mocked application launching.
+- Headless Chromium passed the bundled Draft renderer without an installed Windhawk UI/core: immediate toolbar, Source/Output/More, read-only settings, blocked mutation requests, source refresh, English/Chinese, light/dark themes, and widths down to 240px. Sidebar checks passed with VS Code’s dark/light themes, high contrast, and visible scrollbars.
+- An isolated VS Code Extension Development Host passed activation, generation, save handling, output-edit protection, the native parser, and the bundled Discover renderer in a real webview.
+- Windhawk 2.0.0-alpha.7 passed the actual CLI help probes and native Chinese metadata/settings parsing. No installed mods were written or activated; the launcher was mocked.
+- Both x64 and ARM64 bridges compiled. ARM64 execution and non-portable installation permissions remain untested.
+
+Git-related tests create scratch projects in the system temporary directory, outside the source checkout. The older reports below describe their respective releases.
+
+
+The 36 regression tests cover generation/recovery, project setup, and runtime controls. Runtime tests use a simulated Windhawk backend to check first-install disabling, preservation of enabled builds, fixed compile snapshots during edits, failure recovery, source-mapped compiler errors, and older-version notices.
+
+The preview test runs the user's actual Windhawk 2.0 alpha 7 core parser and frontend. It deliberately holds all Windhawk assets while verifying that sidebar navigation and Source work first, then checks that loading native styles does not resize the controls. It also checks the More menu, pending-refresh dot and tooltip, preservation of open settings without extra renderer requests, Draft/Installed selection on refresh, and narrow/light layouts. Adapter tests check sidebar-first opening without additional core reads, restoring navigation, and ignoring late preview messages. Writes are simulated; no real mod is installed, enabled, or reconfigured. Browser checks also cover the sidebar across VS Code themes and narrow widths.
+
+The packaged extension is checked in an isolated real VS Code Extension Host, including native parser invocation and the embedded Discover page's IPC handshake. The native bridge is built for x64 and ARM64; execution is verified on x64. ARM64 execution and actual process injection are not tested here.
+
+## Version 1.1.2
 
 The scrollbar regression was reproduced before the fix with visible browser scrollbars: the Generation screen narrowed both tab rows. After reserving the scrollbar gutter, measured button widths and positions are identical across Editor, Generation, and Git at 240px and 380px widths. The test explicitly confirms Generation overflows vertically and uses VS Code's 10px injected scrollbar dimensions. Existing sidebar workflows and theme assertions also pass with scrollbars enabled.
 

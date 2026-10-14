@@ -1,0 +1,11 @@
+{
+  "command": "listFontFamilies",
+  "type": "reply",
+  "data": {
+    "families": [
+      "Arial",
+      "Consolas",
+      "Segoe UI"
+    ]
+  }
+}

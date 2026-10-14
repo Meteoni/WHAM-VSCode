@@ -1,0 +1,7 @@
+{
+  "command": "pickFilePath",
+  "type": "reply",
+  "data": {
+    "canceled": true
+  }
+}

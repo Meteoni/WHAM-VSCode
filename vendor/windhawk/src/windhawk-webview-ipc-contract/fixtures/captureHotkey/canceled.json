@@ -1,0 +1,8 @@
+{
+  "command": "captureHotkey",
+  "type": "reply",
+  "data": {
+    "hotkey": null,
+    "canceled": "focusLost"
+  }
+}

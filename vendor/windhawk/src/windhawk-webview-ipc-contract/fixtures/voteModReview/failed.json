@@ -1,0 +1,13 @@
+{
+  "command": "voteModReview",
+  "type": "reply",
+  "data": {
+    "modId": "taskbar-clock-customization",
+    "votes": [],
+    "succeeded": false,
+    "error": {
+      "code": "INVALID_REQUEST",
+      "message": "unknown command: voteModReview"
+    }
+  }
+}

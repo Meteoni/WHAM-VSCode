@@ -1,0 +1,7 @@
+{
+  "command": "pickFilePath",
+  "type": "reply",
+  "data": {
+    "path": "C:\\Users\\me\\Music\\chime.wav"
+  }
+}

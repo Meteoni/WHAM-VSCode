@@ -1,0 +1,11 @@
+{
+  "command": "listFontFamilies",
+  "type": "reply",
+  "data": {
+    "families": [],
+    "error": {
+      "code": "INTERNAL",
+      "message": "font enumeration: powershell.exe exited with code 1"
+    }
+  }
+}

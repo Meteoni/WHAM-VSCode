@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { parse } = require('jsonc-parser');
 const { defaults } = require('../dist/config');
@@ -10,7 +11,7 @@ const { setupProject, createInitialCommit, gitStatus, editorConfiguration, readE
 const { nodeFiles, commitRestore } = require('../dist/io');
 
 test('new Git setup and ignore rules are idempotent and preserve an enclosing repository', async () => {
-  const root = path.resolve('work', 'git-setup-' + Date.now()); await fs.mkdir(root, { recursive: true });
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-git-setup-')); await fs.mkdir(root, { recursive: true });
   const git = process.env.WHAM_TEST_GIT || 'git';
   try {
     await fs.writeFile(path.join(root, '.gitignore'), '# keep this\nprivate/\n');
@@ -29,7 +30,7 @@ test('new Git setup and ignore rules are idempotent and preserve an enclosing re
 });
 
 test('editor configuration resolves Windhawk APIs and preserves existing JSONC and formatting options', async () => {
-  const root = path.resolve('work', 'editor-setup-' + Date.now());
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-editor-setup-'));
   const installation = path.join(root, 'windhawk'); await fs.mkdir(path.join(root, '.vscode'), { recursive: true });
   await fs.mkdir(path.join(installation, 'Compiler/bin'), { recursive: true }); await fs.mkdir(path.join(installation, 'Compiler/include'), { recursive: true });
   for (const file of ['Compiler/bin/clang++.exe', 'Compiler/bin/clangd.exe', 'Compiler/include/windhawk_api.h']) await fs.writeFile(path.join(installation, file), 'fixture');
@@ -50,6 +51,9 @@ test('editor configuration resolves Windhawk APIs and preserves existing JSONC a
     const repeated = await editorConfiguration(project, editor); for (const [file, bytes] of repeated) assert.deepEqual(bytes, files.get(file), file);
     const applied = await readEditorSettings(root);
     assert.equal(applied.installationPath, installation); assert.equal(applied.indentSize, 3); assert.equal(applied.indentStyle, 'tabs'); assert.equal(applied.integration, 'both');
+    await fs.writeFile(path.join(root, '.vscode/settings.json'), '{"[cpp]":{"editor.tabSize":8,"editor.insertSpaces":true}}');
+    const sharedFormat = await readEditorSettings(root);
+    assert.equal(sharedFormat.indentSize, 3); assert.equal(sharedFormat.indentStyle, 'tabs', 'Shared formatting takes precedence over a stale local editor mirror');
     await fs.rm(path.join(root, '.vscode/settings.json')); await fs.rm(path.join(root, '.vscode/c_cpp_properties.json'));
     const formattingOnly = await readEditorSettings(root, editor); assert.equal(formattingOnly.indentSize, 3); assert.equal(formattingOnly.indentStyle, 'tabs'); assert.equal(formattingOnly.installationPath, installation);
     await fs.writeFile(path.join(root, '.vscode/settings.json'), '{broken'); await fs.writeFile(path.join(root, '.clang-format'), 'IndentWidth: [broken');
@@ -58,7 +62,7 @@ test('editor configuration resolves Windhawk APIs and preserves existing JSONC a
 });
 
 test('recover multiple mods, deduplicate shared files, retain entries and detect divergent copies', async () => {
-  const root = path.resolve('work', 'multi-restore-' + Date.now()); await fs.mkdir(path.join(root, 'src'), { recursive: true });
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-multi-restore-')); await fs.mkdir(path.join(root, 'src'), { recursive: true });
   try {
     await fs.writeFile(path.join(root, 'src/a.cpp'), '#include "shared.h"\nint a;\n');
     await fs.writeFile(path.join(root, 'src/b.cpp'), '#include "shared.h"\nint b;\n');
@@ -75,7 +79,7 @@ test('recover multiple mods, deduplicate shared files, retain entries and detect
 });
 
 test('initial commit contains only setup and recovered sources, and protects existing repositories/staging', async () => {
-  const root = path.resolve('work', 'initial-commit-' + Date.now()), git = process.env.WHAM_TEST_GIT || 'git';
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-initial-commit-')), git = process.env.WHAM_TEST_GIT || 'git';
   await fs.mkdir(root, { recursive: true });
   const gitRun = (...args) => execFileSync(git, ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' });
   try {
@@ -107,7 +111,7 @@ test('initial commit contains only setup and recovered sources, and protects exi
 });
 
 test('initial commit reports missing identity without changing Git identity or removing setup', async () => {
-  const root = path.resolve('work', 'commit-identity-' + Date.now()), git = process.env.WHAM_TEST_GIT || 'git';
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-commit-identity-')), git = process.env.WHAM_TEST_GIT || 'git';
   await fs.mkdir(root, { recursive: true });
   try {
     const project = await setupProject(root, { git });

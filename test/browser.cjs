@@ -32,9 +32,11 @@ const { parse } = require('jsonc-parser');
     const code = await fs.readFile('src/extension.ts', 'utf8');
     const template = /view\.webview\.html = `([\s\S]*?)`;/m.exec(code)[1];
     const html = template.replaceAll('${view.webview.cspSource}', 'file:').replaceAll('${nonce}', 'testnonce')
+      .replace('<head>', '<head><style nonce="testnonce">@layer vscode-default { body { padding: 0 20px; } }</style>')
       // VS Code injects these scrollbar dimensions into every webview.
       .replace('</head>', `<link rel="stylesheet" href="${pathToFileURL(path.resolve('work/webview-scrollbars.css')).href}"></head>`)
-      .replaceAll('${css}', pathToFileURL(path.resolve('media/sidebar.css')).href).replaceAll('${script}', pathToFileURL(path.resolve('media/sidebar.js')).href);
+      .replaceAll('${iconFont}', pathToFileURL(path.resolve('media/windhawk-renderer/codicon.edde7c4363c6d735a416.ttf')).href)
+      .replaceAll('${sidebarStyles}', await fs.readFile('media/sidebar.css', 'utf8')).replaceAll('${script}', pathToFileURL(path.resolve('media/sidebar.js')).href);
     const root = 'C:\\Projects\\Windhawk';
     const config = { formatVersion: 1, sourceDirectory: 'src', outputDirectory: 'output', entries: ['**/*.cpp'], exclude: [], includeDirectories: ['src'], externalIncludes: [], generate: 'onSave', debounceMs: 250, inlineAngleIncludes: false };
     const metadata = parseMetadata(await fs.readFile('examples/demo/src/demo.cpp', 'utf8'), 'demo.cpp');
@@ -44,16 +46,19 @@ const { parse } = require('jsonc-parser');
       { label: 'Recent mod', detail: 'C:/Recent', root: 'C:/Recent' },
       { label: 'Browse for a project folder…', detail: '', root: '' }
     ];
-    const state = { type: 'state', openAfterSetup: true, selected: root, projectChoices: choices, projects: [{ root, name: 'Windhawk', opened: true, config,
+    const state = { type: 'state', computer: { installationPath: 'C:/Windhawk', integration: 'cpp', installations: {} }, openAfterSetup: true, selected: root, projectChoices: choices, projects: [{ root, name: 'Windhawk', opened: true, config, local: { integration: 'cpp' },
       editor: { installationPath: 'C:/Windhawk', integration: 'cpp', indentStyle: 'spaces', indentSize: 4 }, git: { branch: 'main', changes: 2 }, retained: [], entries: [
-        { path: root + '\\src\\demo.cpp', label: 'demo.cpp', status: 'current', message: '3 source file(s)', metadata },
-        { path: root + '\\src\\tools\\second.cpp', label: 'tools/second.cpp', status: 'blocked', message: 'Output was edited. Compare or restore its edits.', metadata: parseMetadata(await fs.readFile('examples/demo/src/tools/second.cpp', 'utf8'), 'second.cpp') }
+        { path: root + '\\src\\demo.cpp', label: 'demo.cpp', status: 'current', dependencies: 3, runtime: { installed: false, enabled: false, busy: false, changesPending: false }, message: '3 source file(s)', metadata },
+        { path: root + '\\src\\tools\\second.cpp', label: 'tools/second.cpp', status: 'blocked', dependencies: 1, runtime: { installed: true, enabled: true, busy: false, changesPending: true }, message: 'Output was edited. Compare or restore its edits.', metadata: parseMetadata(await fs.readFile('examples/demo/src/tools/second.cpp', 'utf8'), 'second.cpp') }
       ] }] };
     await page.addInitScript(() => { let stored; window.sent = []; window.acquireVsCodeApi = () => ({ postMessage: message => window.sent.push(message), getState: () => stored, setState: value => { stored = value; } }); });
     await fs.mkdir('work/screenshots', { recursive: true });
     await fs.writeFile('work/webview-scrollbars.css', '::-webkit-scrollbar { width: 10px; height: 10px; }');
     await fs.writeFile('work/sidebar.html', html);
     await page.goto(pathToFileURL(path.resolve('work/sidebar.html')).href);
+    assert.equal(await page.evaluate(()=>getComputedStyle(document.body).padding),'0px');
+    const navigationBounds=await page.locator('.main-navigation').boundingBox();
+    assert.equal(navigationBounds.x,12);assert.equal(navigationBounds.width,356,'Main navigation has the same inset as details at 380px');
     const applyTheme = async colors => {
       await page.evaluate(colors => {
         const root = document.documentElement;
@@ -66,7 +71,7 @@ const { parse } = require('jsonc-parser');
     };
     await applyTheme(themes[0][1]);
     assert.ok(await page.locator('#page-setup').isVisible()); assert.ok(await page.locator('#page-project').isHidden()); assert.ok(await page.locator('#page-settings').isHidden());
-    assert.ok(await page.locator('[data-page="settings"]').isDisabled());
+    assert.ok(await page.locator('[data-page="settings"]').isEnabled());
     await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-setup-${version}.png`), fullPage: true });
     const wideCards = await page.locator('.setup-options button').evaluateAll(buttons => buttons.map(button => button.getBoundingClientRect().height));
     await page.setViewportSize({ width: 240, height: 900 });
@@ -97,17 +102,106 @@ const { parse } = require('jsonc-parser');
     await page.evaluate(state => window.dispatchEvent(new MessageEvent('message', { data: state })), state);
     assert.equal(await page.locator('article').count(), 2);
     assert.equal(await page.locator('article .link').first().textContent(), metadata.fields.name[0]);
-    await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-project-${version}.png`), fullPage: true });
+    assert.deepEqual(await page.locator('article .entry-actions').first().locator('button:visible').allTextContents(), ['Generate', 'Source', 'Compile']);
+    assert.deepEqual(await page.locator('article .entry-actions').nth(1).locator('button:visible').allTextContents(), ['Generate', 'Source', 'Compile']);
+    await page.evaluate(() => document.fonts.ready);
+    assert.equal(await page.locator('article .compile-needed').textContent(), '\ueb6d');
+    assert.equal(await page.locator('article .compile-needed').evaluate(icon=>getComputedStyle(icon).borderWidth),'0px');
+    assert.ok(await page.evaluate(()=>document.fonts.check('16px wham-codicon')), 'Bundled Codicon font loads');
+    assert.equal(await page.getByRole('img', {name:'Needs compilation'}).count(), 1);
+    assert.match(await page.locator('article .compile-needed').getAttribute('title'), /need compilation/);
+    assert.match(await page.locator('article .badge.current').getAttribute('title'), /matches.*saved source/);
+    assert.match(await page.locator('article .badge.blocked').getAttribute('title'), /preserve/);
+    const unknownState={...state,projects:[{...state.projects[0],entries:state.projects[0].entries.map((entry,index)=>index===1?{...entry,runtime:{...entry.runtime,changesPending:false,compileStatus:'unknown'}}:entry)}]};
+    await page.evaluate(state=>window.dispatchEvent(new MessageEvent('message',{data:state})),unknownState);
+    const unknownIcon=page.getByRole('img',{name:'Build unknown'});
+    assert.equal(await unknownIcon.textContent(),'\ueb32');assert.match(await unknownIcon.getAttribute('title'),/cannot confirm which source/);
+    assert.equal(await unknownIcon.evaluate(icon=>getComputedStyle(icon).borderWidth),'0px');
+    assert.equal(await unknownIcon.evaluate(icon=>getComputedStyle(icon).color),await page.locator('article .muted').first().evaluate(text=>getComputedStyle(text).color));
+    await unknownIcon.waitFor({state:'visible'});
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    await page.screenshot({path:path.resolve('work/screenshots/sidebar-build-unknown-'+version+'.png'),fullPage:true});
+    await page.evaluate(state=>window.dispatchEvent(new MessageEvent('message',{data:state})),state);
+    const folderButton = page.locator('.project-heading [data-action="openFolder"]');
+    assert.equal(await folderButton.getAttribute('title'), 'Open project folder in VS Code.');
+    assert.equal(await folderButton.textContent(), 'Open');
+    await folderButton.click(); assert.equal((await page.evaluate(() => window.sent.at(-1))).action, 'openFolder');
+    assert.ok(await page.locator('article .entry-source-info').first().getByRole('switch').isVisible());
+    assert.equal(await page.locator('article .entry-actions').first().getByRole('button', { name: 'Generate', exact: true }).getAttribute('class'), null);
+    assert.equal(await page.locator('article .entry-actions').first().getByRole('button', { name: 'Compile', exact: true }).getAttribute('class'), 'primary');
+    const split = page.locator('article .compile-split').first();
+    const splitStyles = await split.evaluate(element => { const main = getComputedStyle(element.firstElementChild), arrow = getComputedStyle(element.querySelector('summary')); return {mainHeight:element.firstElementChild.offsetHeight, arrowHeight:element.querySelector('summary').offsetHeight, width:element.querySelector('summary').offsetWidth, mainCorner:main.borderTopRightRadius, arrowCorner:arrow.borderTopLeftRadius, mainBackground:main.backgroundColor, arrowBackground:arrow.backgroundColor}; });
+    assert.equal(splitStyles.mainHeight,splitStyles.arrowHeight);assert.equal(splitStyles.width,22);
+    assert.equal(splitStyles.mainCorner,'0px');assert.equal(splitStyles.arrowCorner,'0px');assert.equal(splitStyles.mainBackground,splitStyles.arrowBackground);
+    const expander=split.getByRole('button',{name:/Compile options/});
+    await expander.click();assert.ok(await split.getByRole('menuitem',{name:'Test build',exact:true}).isVisible());
+    assert.ok(await split.getByRole('menuitem',{name:'Stop compilation',exact:true}).isHidden());
+    await split.getByRole('menuitem',{name:'Test build',exact:true}).click();assert.equal((await page.evaluate(()=>window.sent.at(-1))).action,'testCompile');
+    await expander.click();await split.getByRole('menuitem',{name:'Verify syntax',exact:true}).click();assert.equal((await page.evaluate(()=>window.sent.at(-1))).action,'verify');
+    await expander.click();await page.locator('.mods-heading h2').click();assert.equal(await split.locator('details').getAttribute('open'),null,'Outside click closes menu');
+    await expander.click();await page.keyboard.press('Escape');assert.equal(await split.locator('details').getAttribute('open'),null);
+    await page.screenshot({ path: path.resolve('work/screenshots/sidebar-project-'+version+'.png'), fullPage: true });
+    await page.locator('article').first().getByRole('button', { name: 'Compile', exact: true }).click();
+    assert.equal((await page.evaluate(() => window.sent.at(-1))).action, 'compile');
+    assert.ok(await page.locator('article').first().getByRole('switch').isDisabled());
+    assert.equal(await page.locator('article .runtime-toggle').first().textContent(),'Disabled');
+    assert.ok(await page.locator('article .runtime-toggle').first().evaluate(label => label.lastChild.matches('input')), 'Toggle follows its text');
+    assert.equal(await page.locator('article .runtime-toggle').nth(1).textContent(),'Enabled');
+    const installedSwitch = page.locator('article').nth(1).getByRole('switch'); assert.ok(await installedSwitch.isChecked());
+    await installedSwitch.click(); const enableMessage = await page.evaluate(() => window.sent.at(-1)); assert.equal(enableMessage.action, 'enable'); assert.equal(enableMessage.enabled, false);
+    assert.ok(await installedSwitch.isChecked(), 'Wait for confirmed Windhawk state before changing the displayed switch');
+    for(const [operation,label,enabled]of [['enable','Enabling…',false],['disable','Disabling…',true]]) {
+      const pending={...state,projects:[{...state.projects[0],entries:state.projects[0].entries.map((entry,index)=>index===1?{...entry,runtime:{...entry.runtime,enabled,busy:true,operation}}:entry)}]};
+      await page.evaluate(state=>window.dispatchEvent(new MessageEvent('message',{data:state})),pending);
+      assert.equal(await page.locator('article .runtime-toggle').nth(1).textContent(),label);
+      assert.ok(await page.locator('article').nth(1).getByRole('button',{name:'Compile',exact:true}).isDisabled());
+      assert.equal(await page.getByRole('button',{name:'Compiling…',exact:true}).count(),0);
+    }
+    const compilingState={...state,projects:[{...state.projects[0],entries:state.projects[0].entries.map((entry,index)=>index===1?{...entry,runtime:{...entry.runtime,busy:true,operation:'compile'}}:entry)}]};
+    await page.evaluate(state=>window.dispatchEvent(new MessageEvent('message',{data:state})),compilingState);
+    const compilingButton=page.locator('article').nth(1).getByRole('button',{name:'Compile',exact:true});
+    assert.ok(await compilingButton.isDisabled());assert.equal(await compilingButton.getAttribute('aria-busy'),'true');
+    assert.equal(await page.locator('.compile-spinner').count(),1);
+    const compilingMenu=page.locator('article .compile-menu').nth(1);
+    await compilingMenu.locator('summary').click();
+    assert.ok(await compilingMenu.getByRole('menuitem',{name:'Test build',exact:true}).isDisabled());
+    assert.ok(await compilingMenu.getByRole('menuitem',{name:'Stop compilation',exact:true}).isVisible());
+    await compilingMenu.getByRole('menuitem',{name:'Stop compilation',exact:true}).click();assert.equal((await page.evaluate(()=>window.sent.at(-1))).action,'stopCompile');
+    await page.screenshot({path:path.resolve('work/screenshots/sidebar-compiling-'+version+'.png'),fullPage:true});
+    const disabledState={...state,projects:[{...state.projects[0],entries:state.projects[0].entries.map((entry,index)=>index===1?{...entry,runtime:{...entry.runtime,enabled:false}}:entry)}]};
+    await page.evaluate(state=>window.dispatchEvent(new MessageEvent('message',{data:state})),disabledState);
+    assert.equal(await page.locator('article .runtime-toggle').nth(1).textContent(),'Disabled');
+    await page.evaluate(state=>window.dispatchEvent(new MessageEvent('message',{data:state})),state);
+    await page.locator('article .link').first().click(); assert.equal((await page.evaluate(() => window.sent.at(-1))).action, 'details'); assert.ok(await page.locator('#page-project').isVisible());
     await page.getByRole('button', { name: 'Generate all', exact: true }).click(); assert.equal((await page.evaluate(() => window.sent.at(-1))).action, 'generateAll');
-    await page.locator('article .link').first().click(); assert.ok(await page.locator('#page-mod').isVisible());
-    assert.ok((await page.locator('#metadata-fields').textContent()).includes(metadata.fields.id[0]));
-    assert.ok((await page.locator('#readme').textContent()).includes('<script>')); assert.equal(await page.evaluate(() => window.hacked), undefined);
-    await page.getByRole('button', { name: 'Edit metadata in source', exact: true }).click(); assert.equal((await page.evaluate(() => window.sent.at(-1))).line, 0);
-    await page.locator('#page-mod').getByRole('button', { name: 'Restore', exact: true }).click(); assert.equal((await page.evaluate(() => window.sent.at(-1))).action, 'restore');
-    await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-metadata-${version}.png`), fullPage: true });
-    await page.locator('nav[aria-label="Main navigation"] [data-page="project"]').click(); await page.locator('article .link').nth(1).click();
-    await page.getByRole('button', { name: 'Discard output edits…', exact: true }).click(); assert.equal((await page.evaluate(() => window.sent.at(-1))).action, 'discard');
     await page.locator('[data-page="settings"]').click();
+    await page.locator('[data-settings-scope="extension"]').click();
+    assert.ok(await page.locator('#project-settings-navigation').isHidden());
+    assert.ok(await page.locator('#settings-project').isHidden());
+    assert.equal(await page.locator('#page-settings > h1').count(), 0, 'There is no redundant Settings heading');
+    assert.equal(await page.locator('#computer-config h2, [name="useAsDefault"], [name="useDefaultInstallation"], #editor-config [name="installationPath"]').count(),0,'Installation is global, with no redundant heading or default controls');
+    await page.locator('#computer-config [name="elevation"]').selectOption('sudo');
+    assert.equal(await page.locator('#computer-config [name="elevation"] option:checked').textContent(),'Windows sudo');
+    assert.equal(await page.locator('#elevation-help').textContent(),'May require more prompts');
+    await page.locator('#computer-config [name="elevation"]').selectOption('gsudo');
+    assert.ok(await page.locator('#gsudo-path').isVisible());
+    assert.ok(await page.locator('#elevation-help').isHidden(), 'The dropdown already explains gsudo session reuse');
+    await page.locator('#gsudo-path summary').click();
+    assert.ok(!(await page.locator('#gsudo-path').textContent()).includes('gsudo executable'),'The custom path label is not repeated');
+    await page.locator('#computer-config [name="gsudoPath"]').fill('C:/Tools/gsudo.exe');
+    await page.getByRole('button', { name: 'Save preferences', exact: true }).click();
+    const computerMessage=await page.evaluate(()=>window.sent.at(-1));assert.equal(computerMessage.action,'computerPreferences');assert.equal(computerMessage.settings.elevation,'gsudo');
+    await page.screenshot({path:path.resolve('work/screenshots/sidebar-computer-'+version+'.png'),fullPage:true});
+    await page.locator('[data-settings-scope="project"]').click();
+    assert.equal(await page.locator('#settings-project').textContent(), 'These settings apply to Windhawk.');
+    assert.ok(await page.locator('#project-settings-navigation').isVisible());
+    await page.locator('[data-settings="editor"]').click();
+    await page.locator('#editor-config [name="integration"]').selectOption('clangd');
+    assert.ok(await page.getByRole('button',{name:'Apply editor settings',exact:true}).isDisabled(),'Local choices must be saved before applying project files');
+    await page.getByRole('button',{name:'Save local preferences',exact:true}).click();
+    assert.equal((await page.evaluate(()=>window.sent.at(-1))).action,'projectPreferences');
+    await page.evaluate(()=>window.dispatchEvent(new MessageEvent('message',{data:{type:'projectPreferencesSaved'}})));
+    assert.ok(await page.getByRole('button',{name:'Apply editor settings',exact:true}).isEnabled());
     // Generation is taller: a classic scrollbar must not change either tab row.
     for (const width of [240, 380]) {
       await page.setViewportSize({ width, height: 700 });
@@ -115,8 +209,8 @@ const { parse } = require('jsonc-parser');
       for (const settingsPage of ['editor', 'generation', 'git']) {
         await page.locator(`[data-settings="${settingsPage}"]`).click();
         if (settingsPage === 'generation') {
-          assert.ok(await page.evaluate(() => document.documentElement.scrollHeight > document.documentElement.clientHeight), 'Generation must scroll in this regression');
-          assert.equal(await page.evaluate(() => innerWidth - document.documentElement.clientWidth), 10, 'Use VS Code scrollbar dimensions');
+          assert.ok(await page.evaluate(() => document.getElementById('wham-pages').scrollHeight > document.getElementById('wham-pages').clientHeight), 'Generation must scroll in this regression');
+          assert.equal(await page.evaluate(() => document.getElementById('wham-pages').offsetWidth - document.getElementById('wham-pages').clientWidth), 10, 'Use VS Code scrollbar dimensions');
         }
         measurements.push(await page.evaluate(() => [...document.querySelectorAll('nav button')].map(button => {
           const bounds = button.getBoundingClientRect();
@@ -135,7 +229,9 @@ const { parse } = require('jsonc-parser');
     const message = await page.evaluate(() => window.sent.at(-1)); assert.equal(message.action, 'config'); assert.equal(message.config.outputDirectory, 'generated');
     await page.locator('[data-settings="editor"]').click(); await page.locator('[name="indentStyle"]').selectOption('tabs'); await page.locator('[name="indentSize"]').fill('3');
     await page.locator('[data-settings="git"]').click(); assert.ok(await page.locator('#git-settings').isVisible()); assert.ok(await page.locator('#config').isHidden());
-    await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-git-${version}.png`), fullPage: true });
+    assert.deepEqual(await page.locator('#git-settings .git-files').first().locator('li').allTextContents(),['Generated output','.vscode/settings.json','.vscode/c_cpp_properties.json','.clangd']);
+    assert.deepEqual(await page.locator('#git-settings .git-files').nth(1).locator('li').allTextContents(),['Source files','windhawk-amalgamation.json','.clang-format','.vscode/extensions.json','.gitignore']);
+    await page.screenshot({ path: path.resolve('work/screenshots/sidebar-git-'+version+'.png'), fullPage: true });
     for (const [name, colors] of themes) {
       await applyTheme(colors);
       const styles = await page.evaluate(() => {
@@ -148,7 +244,7 @@ const { parse } = require('jsonc-parser');
       });
       assert.equal(styles.border, '1px', name); assert.equal(styles.borderStyle, 'solid', name);
       assert.notEqual(styles.borderColor, 'rgba(0, 0, 0, 0)', name);
-      assert.equal(styles.selectedTabs.length, 2, name);
+      assert.equal(styles.selectedTabs.length, 3, name);
       for (const tab of styles.selectedTabs) {
         assert.equal(tab.radius, '0px', name); assert.equal(tab.topWidth, '2px', name);
         assert.notEqual(tab.topColor, 'rgba(0, 0, 0, 0)', name); assert.equal(tab.shadow, 'none', name);
@@ -163,6 +259,8 @@ const { parse } = require('jsonc-parser');
     }
     await applyTheme(themes[0][1]);
     await page.locator('[data-settings="editor"]').click(); assert.equal(await page.locator('[name="indentSize"]').inputValue(), '3');
+    await page.getByRole('button', { name: 'Review changes…', exact: true }).click();
+    const reviewed=await page.evaluate(()=>window.sent.at(-1));assert.equal(reviewed.action,'reviewEditor');assert.equal(reviewed.settings.indentSize,3);
     await page.getByRole('button', { name: 'Apply editor settings', exact: true }).click();
     const editorMessage = await page.evaluate(() => window.sent.at(-1)); assert.equal(editorMessage.action, 'editor'); assert.equal(editorMessage.settings.indentStyle, 'tabs'); assert.equal(editorMessage.settings.indentSize, 3);
     await page.screenshot({ path: path.resolve(`work/screenshots/sidebar-settings-${version}.png`), fullPage: true });
@@ -170,9 +268,16 @@ const { parse } = require('jsonc-parser');
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
     const restoredPage = await browser.newPage();
     await restoredPage.addInitScript(() => { window.acquireVsCodeApi = () => ({ postMessage() {}, getState: () => ({ page: 'settings', settings: 'generation' }), setState() {} }); });
-    await restoredPage.goto(pathToFileURL(path.resolve('work/sidebar.html')).href);
-    await restoredPage.evaluate(state => window.dispatchEvent(new MessageEvent('message', { data: state })), state);
-    assert.ok(await restoredPage.locator('#page-settings').isVisible()); assert.ok(await restoredPage.locator('#config').isVisible());
+    for (const destination of ['settings', 'project']) {
+      const restoredHtml = html.replace('/* initial sidebar state */', 'window.whamSidebarState = ' + JSON.stringify({ ...state, page: destination }).replace(/</g, '\\u003c') + ';');
+      await fs.writeFile('work/sidebar-restored.html', restoredHtml);
+      await restoredPage.goto(pathToFileURL(path.resolve('work/sidebar-restored.html')).href, { waitUntil: 'domcontentloaded' });
+      assert.ok(await restoredPage.locator('#page-' + destination).isVisible(), 'Restore destination before any host reply');
+      assert.ok(await restoredPage.locator('#page-setup').isHidden());
+      assert.equal(await restoredPage.locator('article .link').count(), 2, 'Cached project cards are ready immediately');
+      if (destination === 'settings') assert.ok(await restoredPage.locator('#config').isVisible());
+      assert.equal(await restoredPage.evaluate(() => window.hacked), undefined);
+    }
     await restoredPage.close();
     assert.deepEqual(errors, []);
     console.log('Browser checks passed: stable tab widths with visible scrollbars; existing sidebar workflows; visible action borders, square tabs, focus and narrow layout in ' + themes.map(([name]) => name).join(', ') + '.');

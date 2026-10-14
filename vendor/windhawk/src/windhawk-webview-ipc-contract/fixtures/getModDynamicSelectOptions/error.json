@@ -1,0 +1,13 @@
+{
+  "command": "getModDynamicSelectOptions",
+  "type": "reply",
+  "data": {
+    "modId": "example@1",
+    "options": {},
+    "error": {
+      "code": "REGISTRY_FAILED",
+      "message": "Access is denied. (os error 5)",
+      "path": "Engine\\ModsWritable\\example@1\\LocalStorage"
+    }
+  }
+}

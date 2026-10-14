@@ -1,0 +1,8 @@
+{
+  "command": "getModDynamicSelectOptions",
+  "type": "reply",
+  "data": {
+    "modId": "example@1",
+    "options": {}
+  }
+}

@@ -1,0 +1,1336 @@
+/**
+ * YAML Schema Validation and Conversion Utilities for Mod Settings
+ *
+ * This module provides:
+ * - Type definitions for mod settings
+ * - YAML schema validation against InitialSettings
+ * - Bidirectional conversion between flat settings and nested YAML
+ */
+
+import {
+  type InitialSettingItem,
+  type InitialSettings,
+  type InitialSettingsValue,
+} from '@app/webviewIPCMessages';
+import * as yaml from 'js-yaml';
+import type { useTranslation } from 'react-i18next';
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+export type ModSettings = Record<string, string | number>;
+
+/**
+ * A value in the nested settings tree. It carries booleans, which the flat
+ * settings a mod is saved as do not: a mod declares a boolean setting as
+ * true/false, so the YAML the user writes may spell one out, and it is
+ * nestedToFlat that turns it into the integer the store holds.
+ */
+export type NestedValue =
+  | string
+  | number
+  | boolean
+  | NestedSettings
+  | (string | number | boolean | NestedSettings)[];
+
+export interface NestedSettings {
+  [key: string]: NestedValue;
+}
+
+export interface TypeMismatchError {
+  key: string;
+  expected: string;
+  actual: string;
+}
+
+/**
+ * Windhawk stores a settings number as a 32-bit integer, which is why a mod
+ * schema may only declare int32-ranged integers. Both the form control and the
+ * YAML validator hold a number to this range, so the two cannot disagree on
+ * what the store can keep.
+ */
+export const INT32_MIN = -2147483648;
+export const INT32_MAX = 2147483647;
+
+/**
+ * The `$min` / `$max` a number setting declares, each absent when it declares
+ * none. Both the form control and the YAML validator hold the value to them,
+ * inclusive; a stored value outside them is shown as it is, not rejected.
+ */
+export type SettingBounds = {
+  min?: number;
+  max?: number;
+};
+
+/**
+ * The bounds an item declares, or undefined for one declaring none.
+ */
+export function settingBounds(
+  item: Pick<InitialSettingItem, 'min' | 'max'>
+): SettingBounds | undefined {
+  if (item.min === undefined && item.max === undefined) {
+    return undefined;
+  }
+  return { min: item.min, max: item.max };
+}
+
+/**
+ * Whether a number lies within the bounds, inclusive; anything lies within
+ * none.
+ */
+export function withinBounds(value: number, bounds: SettingBounds | undefined): boolean {
+  return (
+    (bounds?.min === undefined || value >= bounds.min) &&
+    (bounds?.max === undefined || value <= bounds.max)
+  );
+}
+
+/**
+ * The range as a mismatch names it beside the type: `between 1 and 5`,
+ * `at least 0.5`, `at most 1`; empty for no bounds.
+ */
+export function describeBounds(bounds: SettingBounds | undefined): string {
+  if (bounds?.min !== undefined && bounds.max !== undefined) {
+    return `between ${bounds.min} and ${bounds.max}`;
+  }
+  if (bounds?.min !== undefined) {
+    return `at least ${bounds.min}`;
+  }
+  if (bounds?.max !== undefined) {
+    return `at most ${bounds.max}`;
+  }
+  return '';
+}
+
+/**
+ * The range a slider is drawn over: both bounds, with `min` below `max`. A
+ * number declaring one bound or none gives a rail no ends, and one declaring
+ * the two equal gives it nothing to slide, so neither has a range.
+ */
+export type SliderRange = {
+  min: number;
+  max: number;
+};
+
+export function sliderRange(bounds: SettingBounds | undefined): SliderRange | undefined {
+  if (bounds?.min === undefined || bounds.max === undefined || bounds.min >= bounds.max) {
+    return undefined;
+  }
+  return { min: bounds.min, max: bounds.max };
+}
+
+/**
+ * The step a slider over the range moves by: 1 on an integer item, and on a
+ * `$float` one the largest power of ten that gives the range at least a
+ * hundred positions - `0.01` over `0..1`, `0.1` over `0..10`, `1` over
+ * `0..255`. A value between steps is typed into the field beside the slider.
+ */
+export function sliderStep(range: SliderRange, float: boolean): number {
+  if (!float) {
+    return 1;
+  }
+  return 10 ** Math.floor(Math.log10((range.max - range.min) / 100));
+}
+
+// How many decimals a number is spelled with, `1e-7` read as seven.
+function decimalsOf(n: number): number {
+  const [mantissa, exponent = '0'] = String(n).split('e');
+  const fraction = mantissa.split('.')[1]?.length ?? 0;
+  return Math.max(0, fraction - Number(exponent));
+}
+
+/**
+ * A value the slider reports, rounded to the decimals its positions are
+ * spelled with - the step's, or a bound's where a bound has more, since the
+ * positions are counted off `min` - so a drag over `0..1` writes `0.51` and
+ * never `0.5100000000000001`.
+ */
+export function roundToSliderStep(value: number, range: SliderRange, step: number): number {
+  const decimals = Math.max(decimalsOf(step), decimalsOf(range.min), decimalsOf(range.max));
+  return Number(value.toFixed(decimals));
+}
+
+// ============================================================================
+// Setting Type Descriptors
+// ============================================================================
+
+export enum SettingType {
+  Boolean = 'boolean',
+  Number = 'number',
+  String = 'string',
+  NestedObject = 'nested-object',
+  NumberArray = 'number-array',
+  StringArray = 'string-array',
+  ObjectArray = 'object-array',
+}
+
+type BooleanDescriptor = {
+  kind: SettingType.Boolean;
+  value: boolean;
+  defaultValue: boolean;
+};
+
+type NumberDescriptor = {
+  kind: SettingType.Number;
+  value: number;
+  defaultValue: number;
+};
+
+type StringDescriptor = {
+  kind: SettingType.String;
+  value: string;
+  defaultValue: string;
+};
+
+type NestedDescriptor = {
+  kind: SettingType.NestedObject;
+  value: InitialSettings;
+  children: InitialSettings;
+};
+
+type NumberArrayDescriptor = {
+  kind: SettingType.NumberArray;
+  value: number[];
+  defaultValue: number;
+};
+
+type StringArrayDescriptor = {
+  kind: SettingType.StringArray;
+  value: string[];
+  defaultValue: string;
+};
+
+type ObjectArrayDescriptor = {
+  kind: SettingType.ObjectArray;
+  value: InitialSettings[];
+  children: InitialSettings;
+};
+
+type SettingDescriptor =
+  | BooleanDescriptor
+  | NumberDescriptor
+  | StringDescriptor
+  | NestedDescriptor
+  | NumberArrayDescriptor
+  | StringArrayDescriptor
+  | ObjectArrayDescriptor;
+
+// ============================================================================
+// Type Guard Functions
+// ============================================================================
+
+function isInitialSettingItem(value: unknown): value is InitialSettingItem {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return typeof record['key'] === 'string' && 'value' in record;
+}
+
+function isInitialSettingsArray(value: unknown): value is InitialSettings {
+  return Array.isArray(value) && value.every(isInitialSettingItem);
+}
+
+function isInitialSettingsCollection(value: unknown[]): value is InitialSettings[] {
+  return value.every(isInitialSettingsArray);
+}
+
+function isNumberArrayValue(value: unknown[]): value is number[] {
+  return value.every(item => typeof item === 'number');
+}
+
+function isStringArrayValue(value: unknown[]): value is string[] {
+  return value.every(item => typeof item === 'string');
+}
+
+// ============================================================================
+// Setting Descriptor Functions
+// ============================================================================
+
+/**
+ * What a declared value is, in the terms the form and the YAML both read it in:
+ * its kind, the value itself, and either the children a group holds or the empty
+ * value its leaves start from.
+ *
+ * Throws where the value fits no kind at all - an empty array, an object array
+ * whose first group is empty, an array of mixed or unsupported types. None of
+ * the three can arrive from a mod: the core's settings parser rejects each one
+ * while parsing the source, and a mod whose settings do not parse has no initial
+ * settings to describe. They hold a contract rather than degrade for a schema
+ * that broke it, which is why the render paths calling this do not guard against
+ * them.
+ */
+export function describeSetting(value: InitialSettingsValue): SettingDescriptor {
+  if (typeof value === 'boolean') {
+    return { kind: SettingType.Boolean, value, defaultValue: false };
+  }
+
+  if (typeof value === 'number') {
+    return { kind: SettingType.Number, value, defaultValue: 0 };
+  }
+
+  if (typeof value === 'string') {
+    return { kind: SettingType.String, value, defaultValue: '' };
+  }
+
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('Initial settings arrays must contain at least one template entry.');
+  }
+
+  const arrayValue: unknown[] = value;
+
+  if (isInitialSettingsCollection(arrayValue)) {
+    const [first] = arrayValue;
+    if (first.length === 0) {
+      throw new Error('Invalid object array schema definition.');
+    }
+    return { kind: SettingType.ObjectArray, value: arrayValue, children: first };
+  }
+
+  if (isInitialSettingsArray(arrayValue)) {
+    return { kind: SettingType.NestedObject, value: arrayValue, children: arrayValue };
+  }
+
+  if (isNumberArrayValue(arrayValue)) {
+    return { kind: SettingType.NumberArray, value: arrayValue, defaultValue: 0 };
+  }
+
+  if (isStringArrayValue(arrayValue)) {
+    return { kind: SettingType.StringArray, value: arrayValue, defaultValue: '' };
+  }
+
+  throw new Error(`Unknown setting type for value: ${JSON.stringify(value)}`);
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+export function parseIntLax(value?: string | number | null) {
+  const result = parseInt((value ?? 0).toString(), 10);
+  return Number.isNaN(result) ? 0 : result;
+}
+
+/**
+ * The finite number a `$float` setting's text spells, or null for text that
+ * spells none - an empty one included, which is how an unset setting reads. The
+ * same reading everywhere the setting is judged: the YAML validator, the form's
+ * canonical comparison, and the control's own tidying on blur.
+ */
+export function parseFloatText(value?: string | number | null): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  const text = (value ?? '').trim();
+  if (text === '') {
+    return null;
+  }
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Helper to check if a value is a plain object (not array, not null)
+ */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * An empty map for settings held under keys a mod chose. It has no prototype:
+ * the core holds a parameter key to `[0-9A-Za-z_-]`, so `__proto__` is a name a
+ * mod can declare, and on an ordinary object that name reaches Object.prototype's
+ * accessor rather than a key of its own - a path walked through it reads the
+ * prototype and writes the settings under it onto every object in the webview,
+ * with the setting itself nowhere in the map. Behind no prototype, every segment
+ * of a key is an ordinary property.
+ */
+function emptySettingsMap<T extends object>(): T {
+  return Object.create(null) as T;
+}
+
+function toNestedSettings(value: unknown): NestedSettings {
+  return isPlainObject(value) ? (value as NestedSettings) : emptySettingsMap();
+}
+
+/**
+ * Natural sort comparator for strings with numbers.
+ * Compares strings such that "item2" comes before "item10".
+ */
+export function naturalSort(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * Every path the keys of a flat settings map occupy, in the dotted form a parsed
+ * document is walked in: an array index is dropped, since the elements of an
+ * array are walked under the array's own path, and each ancestor is a path of
+ * its own, since a group is reached before the leaves under it.
+ */
+function settingsKeyPaths(settings: ModSettings): Set<string> {
+  const paths = new Set<string>();
+
+  for (const key of Object.keys(settings)) {
+    let path = '';
+    for (const part of key.split('.')) {
+      const name = part.split('[')[0];
+      path = path ? `${path}.${name}` : name;
+      paths.add(path);
+    }
+  }
+
+  return paths;
+}
+
+// ============================================================================
+// YAML Schema Validation
+// ============================================================================
+
+export class YamlSchemaValidator {
+  private validKeys: Set<string>;
+  private typeSchema: Map<string, string>;
+  // The `$min` / `$max` of the number settings that declare them, keyed the
+  // way typeSchema is.
+  private boundsSchema: Map<string, SettingBounds>;
+
+  constructor(initialSettings: InitialSettings) {
+    this.validKeys = this.buildValidKeys(initialSettings);
+    this.typeSchema = this.buildTypeSchema(initialSettings);
+    this.boundsSchema = this.buildBoundsSchema(initialSettings);
+  }
+
+  private buildValidKeys(settings: InitialSettings, prefix = ''): Set<string> {
+    const keys = new Set<string>();
+
+    for (const item of settings) {
+      const key = prefix ? `${prefix}.${item.key}` : item.key;
+      keys.add(key);
+
+      const descriptor = describeSetting(item.value);
+
+      if (descriptor.kind === SettingType.NestedObject || descriptor.kind === SettingType.ObjectArray) {
+        const nestedKeys = this.buildValidKeys(descriptor.children, key);
+        nestedKeys.forEach(nestedKey => keys.add(nestedKey));
+      }
+    }
+
+    return keys;
+  }
+
+  private buildTypeSchema(settings: InitialSettings, prefix = ''): Map<string, string> {
+    const schema = new Map<string, string>();
+
+    for (const item of settings) {
+      const key = prefix ? `${prefix}.${item.key}` : item.key;
+      const descriptor = describeSetting(item.value);
+
+      // A `$float` setting is a string leaf to the parse, and its own type
+      // here: the document spells it as a number, which a string would refuse.
+      switch (descriptor.kind) {
+        case SettingType.Boolean:
+          schema.set(key, 'boolean');
+          break;
+        case SettingType.Number:
+          schema.set(key, 'number');
+          break;
+        case SettingType.String:
+          schema.set(key, item.float ? 'float' : 'string');
+          break;
+        case SettingType.NestedObject:
+        case SettingType.ObjectArray: {
+          // A group and an object array need a type of their own, not just their
+          // children's: without one, a scalar or a wrong-shaped value written at
+          // this key has nothing to be checked against, and would be saved as a
+          // flat key the mod can never read.
+          schema.set(key, descriptor.kind === SettingType.ObjectArray ? 'object[]' : 'object');
+          const nestedSchema = this.buildTypeSchema(descriptor.children, key);
+          nestedSchema.forEach((type, nestedKey) => schema.set(nestedKey, type));
+          break;
+        }
+        case SettingType.NumberArray:
+          schema.set(key, 'number[]');
+          break;
+        case SettingType.StringArray:
+          schema.set(key, item.float ? 'float[]' : 'string[]');
+          break;
+      }
+    }
+
+    return schema;
+  }
+
+  private buildBoundsSchema(
+    settings: InitialSettings,
+    prefix = ''
+  ): Map<string, SettingBounds> {
+    const schema = new Map<string, SettingBounds>();
+
+    for (const item of settings) {
+      const key = prefix ? `${prefix}.${item.key}` : item.key;
+      const bounds = settingBounds(item);
+      if (bounds) {
+        schema.set(key, bounds);
+      }
+      const descriptor = describeSetting(item.value);
+      if (
+        descriptor.kind === SettingType.NestedObject ||
+        descriptor.kind === SettingType.ObjectArray
+      ) {
+        this.buildBoundsSchema(descriptor.children, key).forEach((nested, nestedKey) =>
+          schema.set(nestedKey, nested)
+        );
+      }
+    }
+
+    return schema;
+  }
+
+  /**
+   * The path the schema declares a flat key under: the key with its indices
+   * removed, so a row of an object array and an element of an array both read
+   * the declaration they were made from.
+   */
+  private declaredPath(flatKey: string): string {
+    return flatKey.replace(/\[\d+\]/g, '');
+  }
+
+  /**
+   * Whether a flat key names a `$float` setting.
+   */
+  private isFloatKey(flatKey: string): boolean {
+    const type = this.typeSchema.get(this.declaredPath(flatKey));
+    return type === 'float' || type === 'float[]';
+  }
+
+  /**
+   * A number outside the bounds its setting declares, as a mismatch naming the
+   * range; null for one within them, or for a setting declaring none.
+   */
+  private rangeError(
+    fullKey: string,
+    value: number,
+    kind: 'integer' | 'number'
+  ): TypeMismatchError | null {
+    const bounds = this.boundsSchema.get(this.declaredPath(fullKey));
+    if (withinBounds(value, bounds)) {
+      return null;
+    }
+    return {
+      key: fullKey,
+      expected: `${kind} ${describeBounds(bounds)}`,
+      actual: String(value),
+    };
+  }
+
+  /**
+   * `flat` with every `$float` setting's value as the text the store holds:
+   * a document spells the setting as a bare number, and a number would be saved
+   * as a 32-bit integer, which is not what the setting is.
+   */
+  floatsAsStoredText(flat: ModSettings): ModSettings {
+    const stored: ModSettings = emptySettingsMap();
+    for (const [key, value] of Object.entries(flat)) {
+      stored[key] =
+        typeof value === 'number' && this.isFloatKey(key) ? String(value) : value;
+    }
+    return stored;
+  }
+
+  /**
+   * The first key the schema does not describe, or null when it describes them
+   * all. `storedKeys` are paths accepted alongside the schema's own: a store
+   * outlives the schema it was written against, keeping keys a later version of
+   * a mod no longer declares, and a document generated from it carries them - so
+   * refusing them would refuse the editor's own output.
+   */
+  validateKeys(nested: NestedSettings, storedKeys?: ReadonlySet<string>): string | null {
+    return this.findInvalidKey(nested, '', storedKeys);
+  }
+
+  private findInvalidKey(
+    nested: NestedSettings,
+    prefix: string,
+    storedKeys: ReadonlySet<string> | undefined
+  ): string | null {
+    for (const [key, value] of Object.entries(nested)) {
+      const fullKey = prefix ? `${prefix}.${key}` : key;
+
+      // Check validity for this key first
+      if (!this.validKeys.has(fullKey) && !storedKeys?.has(fullKey)) {
+        return fullKey;
+      }
+
+      // Then recurse into nested structures
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (isPlainObject(item)) {
+            const invalidKey = this.findInvalidKey(item, fullKey, storedKeys);
+            if (invalidKey) {
+              return invalidKey;
+            }
+          }
+        }
+      } else if (isPlainObject(value)) {
+        const invalidKey = this.findInvalidKey(value, fullKey, storedKeys);
+        if (invalidKey) {
+          return invalidKey;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  validateTypes(nested: NestedSettings, prefix = ''): TypeMismatchError | null {
+    for (const [key, value] of Object.entries(nested)) {
+      const fullKey = prefix ? `${prefix}.${key}` : key;
+      const expectedType = this.typeSchema.get(fullKey);
+
+      // A key with no declared type is one the schema does not describe: either
+      // a stored key validateKeys let through, which there is nothing here to
+      // check it against, or an unknown one, which validateKeys reports first.
+      if (expectedType) {
+        const error = this.validateValue(fullKey, value, expectedType);
+        if (error) return error;
+      }
+    }
+
+    return null;
+  }
+
+  private validateValue(
+    fullKey: string,
+    value: NestedValue,
+    expectedType: string
+  ): TypeMismatchError | null {
+    const actualType = this.getActualType(value);
+
+    // Handle array types
+    if (expectedType.endsWith('[]')) {
+      if (!Array.isArray(value)) {
+        return { key: fullKey, expected: 'array', actual: actualType };
+      }
+      return this.validateArrayElements(fullKey, value, expectedType);
+    }
+
+    if (expectedType === 'boolean') {
+      return this.validateBoolean(fullKey, value);
+    }
+
+    if (expectedType === 'float') {
+      return this.validateFloat(fullKey, value);
+    }
+
+    // A group, checked by shape rather than by name: `typeof null` is 'object'
+    // too, so a bare `group:` would pass the comparison below and be written out
+    // as a flat key holding null - a value neither the store nor the mod reading
+    // it has any room for.
+    if (expectedType === 'object') {
+      if (!isPlainObject(value)) {
+        return { key: fullKey, expected: expectedType, actual: actualType };
+      }
+      return this.validateTypes(value, fullKey);
+    }
+
+    // Handle primitive types
+    if (expectedType !== actualType) {
+      return { key: fullKey, expected: expectedType, actual: actualType };
+    }
+
+    if (expectedType === 'number') {
+      return this.validateInt32(fullKey, value);
+    }
+
+    return null;
+  }
+
+  /**
+   * A boolean setting reads either spelling: the true/false the YAML is written
+   * in and a mod declares the setting with, or the 0/1 the store holds it as.
+   * No other number - the setting has two states, and reading 5 as true would
+   * accept a value neither side can round-trip.
+   */
+  private validateBoolean(fullKey: string, value: NestedValue): TypeMismatchError | null {
+    if (typeof value === 'boolean' || value === 0 || value === 1) {
+      return null;
+    }
+
+    return { key: fullKey, expected: 'true, false, 0 or 1', actual: this.describeValue(value) };
+  }
+
+  /**
+   * A `$float` setting reads a YAML number, or a string spelling one - the form
+   * quoted it, or the store handed back the text it holds - or the empty string
+   * an unset one is written as. Nothing non-finite: `.inf` would be stored as
+   * the text "Infinity", which no mod parses as a number.
+   */
+  private validateFloat(fullKey: string, value: NestedValue): TypeMismatchError | null {
+    if (value === '') {
+      return null;
+    }
+    const parsed =
+      typeof value === 'number' || typeof value === 'string' ? parseFloatText(value) : null;
+    if (parsed !== null) {
+      return this.rangeError(fullKey, parsed, 'number');
+    }
+
+    return { key: fullKey, expected: 'number', actual: this.describeValue(value) };
+  }
+
+  /**
+   * A value as a mismatch names it, for a check that accepts more than one type
+   * and so cannot name the type alone. A scalar reads better named than typed
+   * ("got 5"), but an object or an array has no useful rendering, so those fall
+   * back to the type. A string is quoted: unquoted, "got true" would name a
+   * value a boolean accepts and read as if the check itself were broken.
+   */
+  private describeValue(value: NestedValue): string {
+    if (isPlainObject(value) || Array.isArray(value)) {
+      return this.getActualType(value);
+    }
+    if (typeof value === 'string') {
+      return JSON.stringify(value);
+    }
+    return String(value);
+  }
+
+  /**
+   * The store holds a number only as a DWORD, so a float, an out-of-range
+   * integer, or a non-finite one (it serializes to null) has no representation
+   * there. The backend rejects any of them and the whole save fails, since a
+   * save replaces the entire settings tree; catching it here names the offending
+   * key against the YAML the user is editing instead.
+   */
+  private validateInt32(fullKey: string, value: NestedValue): TypeMismatchError | null {
+    if (
+      typeof value === 'number' &&
+      Number.isInteger(value) &&
+      value >= INT32_MIN &&
+      value <= INT32_MAX
+    ) {
+      return this.rangeError(fullKey, value, 'integer');
+    }
+
+    return { key: fullKey, expected: '32-bit integer', actual: String(value) };
+  }
+
+  private getActualType(value: NestedValue): string {
+    if (Array.isArray(value)) return 'array';
+    // A key written with no value parses as a null, which `typeof` would report
+    // as an object - naming the very shape the key was expected to hold.
+    if (value === null) return 'null';
+    return typeof value;
+  }
+
+  private validateArrayElements(
+    fullKey: string,
+    array: NestedValue[],
+    expectedType: string
+  ): TypeMismatchError | null {
+    const elementType = expectedType.replace('[]', '');
+
+    for (let i = 0; i < array.length; i++) {
+      const item = array[i];
+      const itemKey = `${fullKey}[${i}]`;
+      const actualType = this.getActualType(item);
+
+      if (elementType === 'object') {
+        if (!isPlainObject(item)) {
+          return { key: itemKey, expected: 'object', actual: actualType };
+        }
+        const typeError = this.validateTypes(item, fullKey);
+        if (typeError) return typeError;
+        continue;
+      }
+
+      if (elementType === 'float') {
+        const floatError = this.validateFloat(itemKey, item);
+        if (floatError) return floatError;
+        continue;
+      }
+
+      if (elementType !== actualType) {
+        return { key: itemKey, expected: elementType, actual: actualType };
+      }
+
+      if (elementType === 'number') {
+        const rangeError = this.validateInt32(itemKey, item);
+        if (rangeError) return rangeError;
+      }
+    }
+
+    return null;
+  }
+}
+
+// ============================================================================
+// YAML Conversion Utilities
+// ============================================================================
+
+export class YamlConverter {
+  static flatToNested(flatSettings: ModSettings, initialSettings: InitialSettings): NestedSettings {
+    const nested: NestedSettings = emptySettingsMap();
+    const keysToProcess = Object.keys(flatSettings);
+
+    // Filter keys to only include those that match the schema structure
+    const validKeys = keysToProcess.filter(key => this.keyMatchesSchemaStructure(key, initialSettings));
+
+    for (const key of validKeys) {
+      this.setNestedValue(nested, key, flatSettings[key]);
+    }
+
+    return this.normalizeWithSchema(nested, initialSettings);
+  }
+
+  /**
+   * Check if a key path matches the schema structure.
+   * Returns false if:
+   * - Key uses array notation [index] where schema defines an object
+   * - Key uses object notation .property where schema defines an array
+   */
+  private static keyMatchesSchemaStructure(key: string, initialSettings: InitialSettings): boolean {
+    const parts = this.parseKeyPath(key);
+    let currentSettings = initialSettings;
+
+    for (let i = 0; i < parts.length; i++) {
+      const { part, index } = parts[i];
+
+      // Find the setting that matches this part
+      const setting = currentSettings.find(s => s.key === part);
+
+      if (!setting) {
+        // Key not in schema - let validation handle it
+        return true;
+      }
+
+      const descriptor = describeSetting(setting.value);
+      const isArrayPart = index !== undefined;
+      const expectsArray =
+        descriptor.kind === SettingType.NumberArray ||
+        descriptor.kind === SettingType.StringArray ||
+        descriptor.kind === SettingType.ObjectArray;
+
+      if (expectsArray !== isArrayPart) {
+        return false;
+      }
+
+      switch (descriptor.kind) {
+        case SettingType.ObjectArray:
+        case SettingType.NestedObject:
+          currentSettings = descriptor.children;
+          break;
+        default:
+          return true;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Writes `value` at the path `key` names, creating the containers it runs
+   * through. Two keys can name the same place - the store holds both `foo` and
+   * `foo.sub` once a mod turns a scalar setting into a group, and a nested
+   * document has one place for them - so a node standing where a container is
+   * needed is replaced rather than written through, leaving the last key written
+   * the one that stands.
+   */
+  private static setNestedValue(nested: NestedSettings, key: string, value: string | number): void {
+    const parts = this.parseKeyPath(key);
+    let current = nested;
+
+    // Navigate through all parts, creating structure as needed
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const isLastPart = i === parts.length - 1;
+
+      if (part.index !== undefined) {
+        // Navigate to array by property name
+        if (!Array.isArray(current[part.part])) {
+          current[part.part] = [];
+        }
+        const currentArray = current[part.part] as NestedValue[];
+
+        // Set value or navigate to array element
+        if (isLastPart) {
+          currentArray[part.index] = value;
+        } else {
+          if (!isPlainObject(currentArray[part.index])) {
+            currentArray[part.index] = emptySettingsMap<NestedSettings>();
+          }
+          current = currentArray[part.index] as NestedSettings;
+        }
+      } else {
+        // Set value or navigate to property
+        if (isLastPart) {
+          current[part.part] = value;
+        } else {
+          if (!isPlainObject(current[part.part])) {
+            current[part.part] = emptySettingsMap<NestedSettings>();
+          }
+          current = current[part.part] as NestedSettings;
+        }
+      }
+    }
+  }
+
+  /**
+   * Parse a key path and track whether each part is from bracket notation.
+   * Returns array of {part, index} objects. index is optional.
+   * Example: "config.x" -> [{part: 'config'}, {part: 'x'}]
+   * Example: "config.42" -> [{part: 'config'}, {part: '42'}]
+   * Example: "config[42]" -> [{part: 'config', index: 42}]
+   */
+  private static parseKeyPath(key: string): Array<{ part: string; index?: number }> {
+    const parts: Array<{ part: string; index?: number }> = [];
+    let remaining = key;
+
+    while (remaining) {
+      // Match property name with optional array index: word or word[123]
+      const match = remaining.match(/^([^.[]+)(?:\[(\d+)\])?\.?(.*)/);
+      if (!match) {
+        break;
+      }
+
+      const part: { part: string; index?: number } = { part: match[1] };
+      if (match[2] !== undefined) {
+        part.index = parseInt(match[2], 10);
+      }
+
+      parts.push(part);
+
+      remaining = match[3];
+    }
+
+    return parts;
+  }
+
+  /**
+   * Combines provided values with schema metadata: orders keys, applies
+   * defaults, and coerces to schema types.
+   */
+  private static normalizeWithSchema(target: NestedSettings, schema: InitialSettings): NestedSettings {
+    const ordered: NestedSettings = emptySettingsMap();
+    const remainingKeys = new Set(Object.keys(target));
+
+    for (const item of schema) {
+      const { key } = item;
+      const descriptor = describeSetting(item.value);
+      const existingValue = target[key];
+
+      switch (descriptor.kind) {
+        case SettingType.Boolean:
+        case SettingType.Number:
+          ordered[key] = this.normalizePrimitiveValue(existingValue, descriptor);
+          break;
+        case SettingType.String:
+          ordered[key] = item.float
+            ? this.normalizeFloatValue(existingValue)
+            : this.normalizePrimitiveValue(existingValue, descriptor);
+          break;
+        case SettingType.NestedObject:
+          ordered[key] = this.normalizeNestedObject(existingValue, descriptor.children);
+          break;
+        case SettingType.ObjectArray:
+          ordered[key] = this.normalizeObjectArray(existingValue, descriptor.children);
+          break;
+        case SettingType.NumberArray:
+          ordered[key] = this.normalizePrimitiveArray(existingValue, descriptor.defaultValue, this.isNumberValue);
+          break;
+        case SettingType.StringArray:
+          ordered[key] = item.float
+            ? this.normalizeFloatArray(existingValue)
+            : this.normalizePrimitiveArray(existingValue, descriptor.defaultValue, this.isStringValue);
+          break;
+      }
+
+      remainingKeys.delete(key);
+    }
+
+    if (remainingKeys.size > 0) {
+      const extras = Array.from(remainingKeys).sort(naturalSort);
+      for (const key of extras) {
+        ordered[key] = target[key];
+      }
+    }
+
+    return ordered;
+  }
+
+  private static highestDefinedIndex(array: unknown[]): number {
+    for (let i = array.length - 1; i >= 0; i--) {
+      if (array[i] !== undefined) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private static normalizeNestedObject(value: NestedValue | undefined, schema: InitialSettings): NestedSettings {
+    return this.normalizeWithSchema(toNestedSettings(value), schema);
+  }
+
+  private static normalizeObjectArray(value: NestedValue | undefined, schema: InitialSettings): NestedSettings[] {
+    const existingArray = Array.isArray(value) ? value : [];
+    const highestIndex = Math.max(this.highestDefinedIndex(existingArray), 0);
+    const result: NestedSettings[] = [];
+
+    for (let index = 0; index <= highestIndex; index += 1) {
+      result[index] = this.normalizeWithSchema(toNestedSettings(existingArray[index]), schema);
+    }
+
+    return result;
+  }
+
+  private static normalizePrimitiveArray<T extends string | number>(
+    value: NestedValue | undefined,
+    defaultValue: T,
+    guard: (candidate: unknown) => candidate is T
+  ): T[] {
+    const existingArray = Array.isArray(value) ? value : [];
+    const highestIndex = Math.max(this.highestDefinedIndex(existingArray), 0);
+    const result: T[] = [];
+
+    for (let index = 0; index <= highestIndex; index += 1) {
+      const candidate = existingArray[index];
+      result[index] = guard(candidate) ? candidate : defaultValue;
+    }
+
+    return result;
+  }
+
+  private static isNumberValue(value: unknown): value is number {
+    return typeof value === 'number';
+  }
+
+  private static isStringValue(value: unknown): value is string {
+    return typeof value === 'string';
+  }
+
+  private static normalizePrimitiveValue(
+    value: NestedValue | undefined,
+    descriptor: BooleanDescriptor | NumberDescriptor | StringDescriptor
+  ): string | number | boolean {
+    if (descriptor.kind === SettingType.Boolean) {
+      return this.normalizeBooleanValue(value, descriptor.defaultValue);
+    }
+
+    if (descriptor.kind === SettingType.Number) {
+      return this.normalizeNumberValue(value, descriptor.defaultValue);
+    }
+
+    return this.normalizeStringValue(value, descriptor.defaultValue);
+  }
+
+  /**
+   * A boolean setting renders as the true/false a mod declares it with, not as
+   * the 0/1 it is stored as: the YAML is what an author reads their own defaults
+   * in. The store's integer (or the string an INI backend hands back) is what
+   * comes in, so anything non-zero is true.
+   */
+  private static normalizeBooleanValue(
+    value: NestedValue | undefined,
+    defaultValue: boolean
+  ): boolean {
+    if (value === undefined) {
+      return defaultValue;
+    }
+
+    if (typeof value === 'boolean') {
+      return value;
+    }
+
+    if (typeof value === 'number') {
+      return !!value;
+    }
+
+    if (typeof value === 'string') {
+      return !!parseIntLax(value);
+    }
+
+    return defaultValue;
+  }
+
+  private static normalizeNumberValue(
+    value: NestedValue | undefined,
+    defaultValue: number
+  ): number {
+    if (value === undefined) {
+      return defaultValue;
+    }
+
+    if (typeof value === 'number') {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      return parseIntLax(value);
+    }
+
+    return defaultValue;
+  }
+
+  private static normalizeStringValue(
+    value: NestedValue | undefined,
+    defaultValue: string
+  ): string {
+    if (value === undefined) {
+      return defaultValue;
+    }
+
+    if (typeof value === 'string') {
+      return value;
+    }
+
+    if (typeof value === 'number') {
+      return value.toString();
+    }
+
+    return defaultValue;
+  }
+
+  /**
+   * A `$float` setting is held as text and shown as the number that text
+   * spells, so an author reads `opacity: 0.85` rather than a quoted string.
+   * Text spelling no number - a value the store held before the setting was a
+   * float - is left as it is, for the validator to name on the way back rather
+   * than be read as some number it is not.
+   */
+  private static normalizeFloatValue(value: NestedValue | undefined): string | number {
+    const text = this.normalizeStringValue(value, '');
+    const parsed = parseFloatText(text);
+    return parsed === null ? text : parsed;
+  }
+
+  private static normalizeFloatArray(value: NestedValue | undefined): (string | number)[] {
+    const existingArray = Array.isArray(value) ? value : [];
+    const highestIndex = Math.max(this.highestDefinedIndex(existingArray), 0);
+    const result: (string | number)[] = [];
+
+    for (let index = 0; index <= highestIndex; index += 1) {
+      result[index] = this.normalizeFloatValue(existingArray[index]);
+    }
+
+    return result;
+  }
+
+  /**
+   * A leaf as the store holds it. Only a string or a number is saved - the
+   * backend writes nothing for any other type - so a boolean the user spelled
+   * out becomes the 0/1 a boolean setting is stored as.
+   */
+  private static toStoredValue(value: string | number | boolean): string | number {
+    return typeof value === 'boolean' ? (value ? 1 : 0) : value;
+  }
+
+  static nestedToFlat(nested: NestedValue, prefix = ''): ModSettings {
+    const flat: ModSettings = emptySettingsMap();
+
+    if (Array.isArray(nested)) {
+      nested.forEach((item, index) => {
+        const key = `${prefix}[${index}]`;
+        Object.assign(flat, isPlainObject(item)
+          ? this.nestedToFlat(item, key)
+          : { [key]: this.toStoredValue(item) }
+        );
+      });
+    } else {
+      for (const [key, value] of Object.entries(nested)) {
+        const fullKey = prefix ? `${prefix}.${key}` : key;
+
+        if (Array.isArray(value)) {
+          value.forEach((item, index) => {
+            const arrayKey = `${fullKey}[${index}]`;
+            Object.assign(flat, isPlainObject(item)
+              ? this.nestedToFlat(item as NestedSettings, arrayKey)
+              : { [arrayKey]: this.toStoredValue(item) }
+            );
+          });
+        } else if (isPlainObject(value)) {
+          Object.assign(flat, this.nestedToFlat(value as NestedSettings, fullKey));
+        } else {
+          flat[fullKey] = this.toStoredValue(value);
+        }
+      }
+    }
+
+    return flat;
+  }
+
+  static removeEmptyValues(value: NestedValue): NestedValue {
+    if (Array.isArray(value)) {
+      return this.cleanArray(value);
+    }
+
+    if (isPlainObject(value)) {
+      return this.cleanObject(value);
+    }
+
+    return value;
+  }
+
+  private static cleanArray(
+    array: (string | number | boolean | NestedSettings)[]
+  ): (string | number | boolean | NestedSettings)[] {
+    // Compact a possibly sparse array
+    const compacted = Object.values(array);
+
+    // Find the last non-empty index, but skip the first element
+    let lastNonEmpty = 0;
+    for (let i = compacted.length - 1; i >= 1; i--) {
+      const value = compacted[i];
+      if (!this.isEmptyValue(value)) {
+        lastNonEmpty = i;
+        break;
+      }
+    }
+
+    // Trim to last non-empty element, but never remove all elements
+    const trimmed = compacted.slice(0, lastNonEmpty + 1);
+
+    // Clean nested objects
+    const cleaned = trimmed
+      .map(value => {
+        if (isPlainObject(value)) {
+          return this.cleanObject(value);
+        }
+
+        return value;
+      });
+
+    return cleaned;
+  }
+
+  private static cleanObject(obj: NestedSettings): NestedSettings {
+    return Object.fromEntries(
+      Object.entries(obj)
+        .map(([key, val]) => [key, this.removeEmptyValues(val)])
+    );
+  }
+
+  private static isEmptyValue(value: NestedValue): boolean {
+    if (Array.isArray(value)) {
+      return value.every(v => this.isEmptyValue(v));
+    }
+
+    if (isPlainObject(value)) {
+      return Object.values(value).every(v => this.isEmptyValue(v));
+    }
+
+    // false is the unset state of a boolean the same way 0 is of a number; a
+    // boolean renders as false rather than 0, so both spellings count here.
+    return value === '' || value === 0 || value === false;
+  }
+
+  /**
+   * The settings as a YAML document - empty text where they hold nothing to
+   * write. A conversion that fails throws rather than answering with that same
+   * empty text: an empty document says the mod has no settings, and a buffer
+   * shown from one is saved as every value cleared.
+   */
+  static toYaml(settings: ModSettings, initialSettings: InitialSettings): string {
+    const nested = this.flatToNested(settings, initialSettings);
+    const cleaned = this.removeEmptyValues(nested);
+    const yamlText = yaml.dump(cleaned, {
+      indent: 2,
+      lineWidth: -1,
+      noRefs: true,
+      sortKeys: false,
+    });
+    return yamlText.trim() === '{}' ? '' : yamlText;
+  }
+
+  /**
+   * `sourceSettings` is the settings the buffer being parsed was generated from;
+   * the keys it holds are accepted on top of the schema's own (see
+   * `validateKeys`). Without it a document is held to the schema alone.
+   */
+  static fromYaml(
+    yamlString: string,
+    validator: YamlSchemaValidator,
+    t: ReturnType<typeof useTranslation>['t'],
+    sourceSettings?: ModSettings,
+  ): { settings: ModSettings | null; error: string | null } {
+    if (!yamlString.trim()) {
+      return { settings: {}, error: null };
+    }
+
+    try {
+      const parsed = yaml.load(yamlString);
+
+      // Validate structure
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { settings: null, error: t('modDetails.settings.yamlInvalid') };
+      }
+
+      // Validate keys. This runs first for a reason: `validateTypes` reports
+      // nothing about a key it has no type for, leaving every unknown key to the
+      // pass below, and it recurses only through the values its own schema
+      // accepts. Reordering the two, or dropping this one, lets an unknown key
+      // through to be saved.
+      const invalidKey = validator.validateKeys(
+        parsed as NestedSettings,
+        sourceSettings && settingsKeyPaths(sourceSettings)
+      );
+      if (invalidKey) {
+        return {
+          settings: null,
+          error: t('modDetails.settings.yamlInvalidKey', { key: invalidKey })
+        };
+      }
+
+      // Validate types
+      const typeError = validator.validateTypes(parsed as NestedSettings);
+      if (typeError) {
+        return {
+          settings: null,
+          error: t('modDetails.settings.yamlTypeMismatch', {
+            key: typeError.key,
+            expected: typeError.expected,
+            actual: typeError.actual
+          })
+        };
+      }
+
+      return {
+        settings: validator.floatsAsStoredText(this.nestedToFlat(parsed as NestedSettings)),
+        error: null,
+      };
+    } catch (error) {
+      return {
+        settings: null,
+        error: t('modDetails.settings.yamlParseError', {
+          error: error instanceof Error ? error.message : String(error)
+        })
+      };
+    }
+  }
+}
+
+// ============================================================================
+// Exported for Testing
+// ============================================================================
+
+// Types exported for testing only
+export type typesForTesting = {
+  ModSettings: ModSettings;
+  NestedValue: NestedValue;
+  NestedSettings: NestedSettings;
+  InitialSettings: InitialSettings;
+  InitialSettingItem: InitialSettingItem;
+  TypeMismatchError: TypeMismatchError;
+};
+
+// Exported for testing only
+export const exportedForTesting = {
+  // Types
+  SettingType,
+  // Helper functions
+  isPlainObject,
+  naturalSort,
+  // Classes
+  YamlSchemaValidator,
+  YamlConverter,
+};

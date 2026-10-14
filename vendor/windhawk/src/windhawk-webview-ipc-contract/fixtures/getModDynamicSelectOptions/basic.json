@@ -1,0 +1,22 @@
+{
+  "command": "getModDynamicSelectOptions",
+  "type": "reply",
+  "data": {
+    "modId": "example@1",
+    "options": {
+      "outputDevice": [
+        {
+          "value": "{0.0.0.00000000}.{a1b2c3d4-0000-0000-0000-000000000001}",
+          "label": "Speakers (Realtek High Definition Audio)"
+        },
+        {
+          "value": "{0.0.0.00000000}.{a1b2c3d4-0000-0000-0000-000000000002}",
+          "label": "Headphones"
+        }
+      ],
+      "rules.device": [
+        { "value": "usb::0483:5740", "label": "USB Serial Device (COM3)" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "command": "cancelCaptureHotkey",
+  "type": "reply",
+  "data": {
+    "signaled": false
+  }
+}

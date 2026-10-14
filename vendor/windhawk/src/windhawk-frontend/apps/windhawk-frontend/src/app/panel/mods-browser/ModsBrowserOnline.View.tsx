@@ -1,0 +1,1033 @@
+import { AppUISettingsContext } from '@app/appUISettings';
+import { DropdownModal, InputWithContextMenu } from '@app/components/InputWithContextMenu';
+import { useNavigationBlock } from '@app/navigationBlock';
+import { formatCompactCount, isMobile } from '@app/utils';
+import type { ModMetadata, RepositoryDetails } from '@app/webviewIPCMessages';
+import {
+  faArrowDownAZ,
+  faArrowDownWideShort,
+  faFilter,
+  faSearch,
+  faSort,
+} from '@fortawesome/free-solid-svg-icons';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { Badge, Button, Empty, type InputRef, Result, Spin, Tooltip } from 'antd';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useInfiniteScroll } from 'react-infinite-scroll-component';
+import { useLocation, useNavigate } from 'react-router-dom';
+import styled, { css } from 'styled-components';
+import { ModDetails } from '../mod-details';
+import type {
+  ModDetailsAppProps,
+  ModActionCallbacks,
+} from '../mod-details/ModDetails.App';
+import { ModCard } from '../shared';
+import { type InstalledMods } from '../shared/installedMod';
+import { modHasUpdateOnOffer } from '../shared/updateOffer';
+import useKeyboardShortcut, { isTypingTarget } from '../shared/useKeyboardShortcut';
+import { type ModOperation } from './modOperation';
+import ModOperationModal from './ModOperationModal';
+import { isModPageFromApp, MODS_PATH } from './modsPath';
+
+const CenteredContainer = styled.div`
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+`;
+
+const CenteredContent = styled.div`
+  margin: auto;
+
+  // Without this the centered content looks too low.
+  padding-bottom: 10vh; /* Fallback for older browsers */
+  padding-bottom: 10dvh;
+`;
+
+const SearchFilterContainer = styled.div`
+  display: flex;
+  gap: 10px;
+  margin: 20px 0;
+`;
+
+const SearchFilterInput = styled(InputWithContextMenu)`
+  > .ant-input-prefix {
+    margin-inline-end: 8px;
+  }
+`;
+
+const IconButton = styled(Button)`
+  padding-inline-start: 0;
+  padding-inline-end: 0;
+  min-width: 40px;
+`;
+
+const ModsContainer = styled.div<{ $extraBottomPadding?: boolean }>`
+  flex: 1;
+  ${({ $extraBottomPadding }) => css`
+    padding-bottom: ${$extraBottomPadding ? 70 : 20}px;
+  `}
+`;
+
+const ResultsMessageWrapper = styled.div`
+  margin-top: 85px;
+`;
+
+const ModsGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fill,
+    calc(min(400px - 20px * 4 / 3, 100%))
+  );
+  gap: 20px;
+  justify-content: center;
+`;
+
+const ProgressSpin = styled(Spin)`
+  display: block;
+  margin-inline-start: auto;
+  margin-inline-end: auto;
+  font-size: 32px;
+`;
+
+const FILTER_MENU_FOOTER_CLASS = 'filter-menu-footer';
+
+// The footer stays in view at the bottom of the scrolling menu. It carries the
+// menu's bottom padding, since a sticky box stops short of its scroller's
+// padding and would leave a strip for the scrolled entries to show through.
+const FilterMenu = styled.div`
+  > .ant-dropdown-menu {
+    padding-bottom: 0;
+  }
+
+  .${FILTER_MENU_FOOTER_CLASS} {
+    position: sticky;
+    bottom: 0;
+    padding-bottom: 4px;
+    background-color: inherit;
+
+    > .ant-dropdown-menu-item-group-title {
+      display: none;
+    }
+
+    > .ant-dropdown-menu-item-group-list {
+      margin: 0;
+    }
+  }
+`;
+
+const FilterGroupTitle = styled.span`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+`;
+
+// The padding widens the click target and the negative margin cancels it in the
+// layout, so the title keeps its height and the icon stays at the menu's edge.
+const FilterGroupOrderButton = styled(Button)`
+  height: auto;
+  padding: 2px 6px;
+  margin: -2px -6px;
+`;
+
+const FilterItemLabelWrapper = styled.span`
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+`;
+
+interface FilterItemLabelProps {
+  label: string;
+  count?: number;
+}
+
+const FilterItemLabel = ({ label, count }: FilterItemLabelProps) => (
+  <FilterItemLabelWrapper>
+    <span>{label}</span>
+    {count !== undefined && (
+      <Badge
+        count={formatCompactCount(count)}
+        title={count.toLocaleString()}
+        color='var(--whui-skeleton-base)'
+        style={{
+          color: 'var(--whui-text-secondary)',
+          boxShadow: 'none',
+          height: '18px',
+          lineHeight: '18px',
+          minWidth: '18px',
+          padding: '0 6px',
+        }}
+        overflowCount={Infinity}
+      />
+    )}
+  </FilterItemLabelWrapper>
+);
+
+const normalizeProcessName = (process: string): string => {
+  return process.includes('\\')
+    ? process.substring(process.lastIndexOf('\\') + 1)
+    : process;
+};
+
+/**
+ * Extracts valid process names from a mod's include array for filtering/counting.
+ * Handles wildcards consistently: "*" is kept as-is, paths with wildcards in
+ * the directory are normalized to filenames, filenames with wildcards are skipped.
+ */
+const extractValidProcesses = (include: string[]): string[] => {
+  const validProcesses: string[] = [];
+
+  for (const process of include) {
+    if (!process) {
+      continue;
+    }
+
+    // Include "*" as-is (matches all processes)
+    if (process === '*') {
+      validProcesses.push('*');
+      continue;
+    }
+
+    // Extract the filename from the path
+    const normalized = normalizeProcessName(process);
+
+    // Skip if the filename itself contains wildcards
+    if (normalized.includes('*') || normalized.includes('?')) {
+      continue;
+    }
+
+    validProcesses.push(normalized);
+  }
+
+  return validProcesses;
+};
+
+// Each mod adds `countOf(mod)` to the count of every item it names: by default
+// 1, which makes an item's count the number of mods naming it.
+const extractItemsWithCounts = <TMod,>(
+  repositoryMods: Record<string, TMod> | null,
+  keyPrefix: string,
+  extractItems: (mod: TMod) => string[],
+  countOf: (mod: TMod) => number = () => 1
+) => {
+  if (!repositoryMods) {
+    return [];
+  }
+
+  const itemCounts = new Map<string, { count: number; casings: Map<string, number> }>();
+
+  for (const mod of Object.values(repositoryMods)) {
+    const items = extractItems(mod);
+    const modCount = countOf(mod);
+
+    // Deduplicate items within this mod to count each mod only once per item
+    const seenLowerItems = new Set<string>();
+
+    for (const item of items) {
+      if (!item) {
+        continue;
+      }
+
+      const lowerItem = item.toLowerCase();
+
+      // Skip if we've already counted this item for this mod
+      if (seenLowerItems.has(lowerItem)) {
+        continue;
+      }
+      seenLowerItems.add(lowerItem);
+
+      const existing = itemCounts.get(lowerItem);
+      if (existing) {
+        existing.count += modCount;
+        const casingCount = existing.casings.get(item);
+        existing.casings.set(item, (casingCount || 0) + 1);
+      } else {
+        const casings = new Map<string, number>();
+        casings.set(item, 1);
+        itemCounts.set(lowerItem, { count: modCount, casings });
+      }
+    }
+  }
+
+  return Array.from(itemCounts.entries())
+    .map(([lowerName, { count, casings }]) => {
+      // Find the most common casing, or first lexicographically if tied
+      const displayName = Array.from(casings.entries()).reduce(
+        (best, [casing, casingCount]) => {
+          if (casingCount > best.count || (casingCount === best.count && casing < best.casing)) {
+            return { casing, count: casingCount };
+          }
+          return best;
+        },
+        { casing: '', count: 0 }
+      ).casing;
+
+      return {
+        name: displayName,
+        count,
+        key: `${keyPrefix}:${lowerName}`,
+        lowerName,
+      };
+    })
+    .sort((a, b) => {
+      if (b.count !== a.count) {
+        return b.count - a.count;
+      }
+      return a.lowerName.localeCompare(b.lowerName);
+    });
+};
+
+// An author's count is the users of all their mods together.
+export const extractAuthorsWithUsers = <TMod,>(
+  repositoryMods: Record<string, TMod> | null,
+  getModMetadata: (mod: TMod) => ModMetadata,
+  getModDetails: (mod: TMod) => RepositoryDetails
+) => {
+  return extractItemsWithCounts(
+    repositoryMods,
+    'author',
+    (mod) => {
+      const metadata = getModMetadata(mod);
+      return metadata.author ? [metadata.author] : [];
+    },
+    (mod) => getModDetails(mod).users
+  );
+};
+
+export const extractProcessesWithCounts = <TMod,>(
+  repositoryMods: Record<string, TMod> | null,
+  getModMetadata: (mod: TMod) => ModMetadata
+) => {
+  return extractItemsWithCounts(
+    repositoryMods,
+    'process',
+    (mod) => {
+      const metadata = getModMetadata(mod);
+      return extractValidProcesses(metadata.include || []);
+    }
+  );
+};
+
+const useFilterState = () => {
+  const [filterText, setFilterText] = useState('');
+  const [filterOptions, setFilterOptions] = useState<Set<string>>(new Set());
+  const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
+  const [showAllAuthors, setShowAllAuthors] = useState(false);
+  const [authorOrder, setAuthorOrder] = useState<'users' | 'alphabetical'>('users');
+  const [showAllProcesses, setShowAllProcesses] = useState(false);
+  const [searchInputFocused, setSearchInputFocused] = useState(!isMobile);
+
+  const handleFilterChange = useCallback((key: string) => {
+    setFilterOptions((prevOptions) => {
+      const newOptions = new Set(prevOptions);
+
+      // Handle mutually exclusive filters for installation status
+      if (key === 'installed' && newOptions.has('not-installed')) {
+        newOptions.delete('not-installed');
+      } else if (key === 'not-installed' && newOptions.has('installed')) {
+        newOptions.delete('installed');
+      }
+
+      // Toggle the clicked option
+      if (newOptions.has(key)) {
+        newOptions.delete(key);
+      } else {
+        newOptions.add(key);
+      }
+
+      return newOptions;
+    });
+  }, []);
+
+  const handleClearFilters = useCallback(() => {
+    setFilterOptions(new Set());
+    setShowAllAuthors(false);
+    setShowAllProcesses(false);
+  }, []);
+
+  return {
+    filterText,
+    setFilterText,
+    filterOptions,
+    filterDropdownOpen,
+    setFilterDropdownOpen,
+    showAllAuthors,
+    setShowAllAuthors,
+    authorOrder,
+    setAuthorOrder,
+    showAllProcesses,
+    setShowAllProcesses,
+    searchInputFocused,
+    setSearchInputFocused,
+    handleFilterChange,
+    handleClearFilters,
+  };
+};
+
+export interface ModsBrowserOnlineViewProps<TMod> {
+  ContentWrapper: React.ComponentType<
+    React.ComponentPropsWithoutRef<'div'> & { $hidden?: boolean }
+  >;
+  repositoryMods: Record<string, TMod> | null;
+  initialDataPending: boolean;
+  displayedModId?: string;
+
+  // Accessor functions - each mode provides its own
+  getModMetadata: (mod: TMod) => ModMetadata;
+  getModMetadataEnglish: (mod: TMod) => ModMetadata | undefined;
+  getModDetails: (mod: TMod) => RepositoryDetails;
+  // The mods on the machine, absent for a mode that has no machine. Held apart
+  // from the listing rather than read off it: the listing describes the catalog,
+  // and the machine is a thing the host goes on answering about separately.
+  // `latestVersion` is the host's, and it is the version the badge is read
+  // against: the one the listing holds is a different cache of the same fact,
+  // and reading that one would have a mod say two things at once across the two
+  // screens.
+  installedMods?: InstalledMods | null;
+
+  // Whether installation status filter should be shown (app build only)
+  showInstallationFilter?: boolean;
+
+  // App-only (optional)
+  installModPending?: boolean;
+  compileModPending?: boolean;
+  modOperation?: ModOperation;
+  onCancelModOperation?: () => Promise<boolean>;
+
+  // Retry handler (different per mode)
+  onRetry?: () => void;
+
+  // ModDetails props (app-only), passed to it as they are given. The
+  // repository side is what this browser reads, and a mod it lists need not be
+  // on the machine, so what puts one there is required here even though a screen
+  // showing only installed mods can do without it: an absent callback takes the
+  // action off the header rather than showing it as one that cannot run.
+  modDetailsAppProps?: ModDetailsAppProps & {
+    loadRepositoryData: boolean;
+    actions: ModActionCallbacks &
+      Required<
+        Pick<
+          ModActionCallbacks,
+          'installMod' | 'updateMod' | 'forkModFromSource'
+        >
+      >;
+  };
+}
+
+export function ModsBrowserOnlineView<TMod>(props: ModsBrowserOnlineViewProps<TMod>) {
+  const {
+    ContentWrapper,
+    repositoryMods,
+    initialDataPending,
+    displayedModId,
+    getModMetadata,
+    getModMetadataEnglish,
+    getModDetails,
+    installedMods,
+    showInstallationFilter,
+    installModPending,
+    compileModPending,
+    modOperation,
+    onCancelModOperation,
+    onRetry,
+    modDetailsAppProps,
+  } = props;
+
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // UI state managed internally
+  const [sortingOrder, setSortingOrder] = useState('popular-top-rated');
+  const [infiniteScrollLoadedItems, setInfiniteScrollLoadedItems] = useState(30);
+  const [detailsButtonClicked, setDetailsButtonClicked] = useState(false);
+
+  // Filter state
+  const {
+    filterText,
+    setFilterText,
+    filterOptions,
+    filterDropdownOpen,
+    setFilterDropdownOpen,
+    showAllAuthors,
+    setShowAllAuthors,
+    authorOrder,
+    setAuthorOrder,
+    showAllProcesses,
+    setShowAllProcesses,
+    searchInputFocused,
+    setSearchInputFocused,
+    handleFilterChange,
+    handleClearFilters,
+  } = useFilterState();
+
+  const { devModeOptOut } = useContext(AppUISettingsContext);
+
+  const searchInputRef = useRef<InputRef>(null);
+
+  // Keyboard shortcut: "/" to focus search (desktop only). Not offered while mod
+  // details are shown, since the search input is hidden then.
+  useKeyboardShortcut(
+    !isMobile && !displayedModId,
+    (e) => e.key === '/' && !isTypingTarget(e),
+    () => searchInputRef.current?.focus()
+  );
+
+  const resetInfiniteScrollLoadedItems = () => setInfiniteScrollLoadedItems(30);
+
+  // Which mods are on the machine, which is all the installed/not-installed
+  // filter needs. Keyed on the ids themselves rather than on the listing: the
+  // filter and sort below is memoized over this, and the listing is a new object
+  // after every write to any mod in it - so reading that directly would have a
+  // rating coming back re-sort the whole catalog. This moves when a mod is
+  // installed or removed and at no other time.
+  const installedModIdsKey = Object.keys(installedMods ?? {})
+    .sort()
+    .join('\n');
+  const installedModIds = useMemo(
+    () => new Set(installedModIdsKey.split('\n').filter(Boolean)),
+    [installedModIdsKey]
+  );
+
+  // Extract filter data
+  const authorFilters = useMemo(() => {
+    const authors = extractAuthorsWithUsers(repositoryMods, getModMetadata, getModDetails);
+    return authorOrder === 'alphabetical'
+      ? authors.sort((a, b) => a.lowerName.localeCompare(b.lowerName))
+      : authors;
+  }, [repositoryMods, getModMetadata, getModDetails, authorOrder]);
+  const authorOrderLabel =
+    authorOrder === 'users'
+      ? t('explore.search.popular')
+      : t('explore.search.alphabeticalOrder');
+
+  const processFilters = useMemo(
+    () => extractProcessesWithCounts(repositoryMods, getModMetadata),
+    [repositoryMods, getModMetadata]
+  );
+
+  const installedModsFilteredAndSorted = useMemo(() => {
+    const filterWords = filterText.toLowerCase().split(/\s+/)
+      .map(word => word.trim())
+      .filter(word => word.length > 0);
+    return Object.entries(repositoryMods || {})
+      .filter(([modId, mod]) => {
+        const metadata = getModMetadata(mod);
+        const metadataEnglish = getModMetadataEnglish(mod);
+
+        // Apply text filter
+        if (filterWords.length > 0) {
+          const textMatch = filterWords.every((filterWord) => {
+            return (
+              modId.toLowerCase().includes(filterWord) ||
+              metadata.name?.toLowerCase().includes(filterWord) ||
+              metadata.description?.toLowerCase().includes(filterWord) ||
+              metadataEnglish?.name?.toLowerCase().includes(filterWord) ||
+              metadataEnglish?.description?.toLowerCase().includes(filterWord)
+            );
+          });
+          if (!textMatch) {
+            return false;
+          }
+        }
+
+        // Apply category filters - if none selected, show all
+        if (filterOptions.size === 0) {
+          return true;
+        }
+
+        // Collect selected authors and processes
+        const selectedAuthors: string[] = [];
+        const selectedProcesses: string[] = [];
+        let installedFilter: boolean | null = null;
+
+        for (const key of filterOptions) {
+          if (key.startsWith('author:')) {
+            selectedAuthors.push(key.substring('author:'.length));
+          } else if (key.startsWith('process:')) {
+            selectedProcesses.push(key.substring('process:'.length));
+          } else if (key === 'installed') {
+            installedFilter = true;
+          } else if (key === 'not-installed') {
+            installedFilter = false;
+          }
+        }
+
+        // Check installation status filter
+        if (installedFilter !== null) {
+          const isInstalled = installedModIds.has(modId);
+          if (isInstalled !== installedFilter) {
+            return false;
+          }
+        }
+
+        // Check author filter (OR logic within authors)
+        if (selectedAuthors.length > 0) {
+          const author = metadata.author?.toLowerCase();
+          if (!author || !selectedAuthors.some(a => a === author)) {
+            return false;
+          }
+        }
+
+        // Check process filter (OR logic within processes)
+        // Uses extractValidProcesses to ensure consistency with counting logic
+        if (selectedProcesses.length > 0) {
+          const processes = extractValidProcesses(metadata.include || [])
+            .map(p => p.toLowerCase());
+          if (!selectedProcesses.some(sp => processes.includes(sp))) {
+            return false;
+          }
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        const [modIdA, modA] = a;
+        const [modIdB, modB] = b;
+        const detailsA = getModDetails(modA);
+        const detailsB = getModDetails(modB);
+
+        switch (sortingOrder) {
+          case 'popular-top-rated':
+            if (detailsB.defaultSorting < detailsA.defaultSorting) {
+              return -1;
+            } else if (detailsB.defaultSorting > detailsA.defaultSorting) {
+              return 1;
+            }
+            break;
+
+          case 'trending': {
+            const trendingA = detailsA.trendingSorting ?? 0;
+            const trendingB = detailsB.trendingSorting ?? 0;
+            if (trendingB < trendingA) {
+              return -1;
+            } else if (trendingB > trendingA) {
+              return 1;
+            }
+            break;
+          }
+
+          case 'popular':
+            if (detailsB.users < detailsA.users) {
+              return -1;
+            } else if (detailsB.users > detailsA.users) {
+              return 1;
+            }
+            if (detailsB.rating < detailsA.rating) {
+              return -1;
+            } else if (detailsB.rating > detailsA.rating) {
+              return 1;
+            }
+            break;
+
+          case 'top-rated':
+            if (detailsB.rating < detailsA.rating) {
+              return -1;
+            } else if (detailsB.rating > detailsA.rating) {
+              return 1;
+            }
+            if (detailsB.users < detailsA.users) {
+              return -1;
+            } else if (detailsB.users > detailsA.users) {
+              return 1;
+            }
+            break;
+
+          case 'newest':
+            if (detailsB.published < detailsA.published) {
+              return -1;
+            } else if (detailsB.published > detailsA.published) {
+              return 1;
+            }
+            break;
+
+          case 'last-updated':
+            if (detailsB.updated < detailsA.updated) {
+              return -1;
+            } else if (detailsB.updated > detailsA.updated) {
+              return 1;
+            }
+            break;
+
+          case 'alphabetical':
+            // Nothing to do.
+            break;
+        }
+
+        // Fallback sorting: Sort by name, then id.
+        const metadataA = getModMetadata(modA);
+        const metadataB = getModMetadata(modB);
+
+        const modATitle = (metadataA.name || modIdA).toLowerCase();
+        const modBTitle = (metadataB.name || modIdB).toLowerCase();
+
+        if (modATitle < modBTitle) {
+          return -1;
+        } else if (modATitle > modBTitle) {
+          return 1;
+        }
+
+        if (modIdA < modIdB) {
+          return -1;
+        } else if (modIdA > modIdB) {
+          return 1;
+        }
+
+        return 0;
+      });
+  }, [repositoryMods, sortingOrder, filterText, filterOptions, getModMetadata, getModMetadataEnglish, getModDetails, installedModIds]);
+
+  const { sentinelRef } = useInfiniteScroll({
+    dataLength: infiniteScrollLoadedItems,
+    next: () =>
+      setInfiniteScrollLoadedItems((prev) =>
+        Math.min(prev + 30, installedModsFilteredAndSorted.length)
+      ),
+    hasMore: infiniteScrollLoadedItems < installedModsFilteredAndSorted.length,
+    scrollableTarget: 'ModsBrowserOnline-ContentWrapper',
+  });
+
+  // IntersectionObserver fires only when the sentinel transitions across
+  // threshold 0; holding End keeps it continuously inside the trigger zone so
+  // the hook stops firing. A scroll listener catches each browser-applied
+  // scroll (one per End keypress) and chains the next batch.
+  const totalCount = installedModsFilteredAndSorted.length;
+  useEffect(() => {
+    const root = document.getElementById('ModsBrowserOnline-ContentWrapper');
+    if (!root) {
+      return;
+    }
+    const handleScroll = () => {
+      if (root.scrollHeight - (root.scrollTop + root.clientHeight) > root.clientHeight) {
+        return;
+      }
+      setInfiniteScrollLoadedItems((prev) =>
+        prev < totalCount ? Math.min(prev + 30, totalCount) : prev
+      );
+    };
+    root.addEventListener('scroll', handleScroll, { passive: true });
+    return () => root.removeEventListener('scroll', handleScroll);
+  }, [totalCount]);
+
+  // Block all navigation when modal is open
+  const modalIsOpen = !!(installModPending || compileModPending);
+
+  useNavigationBlock(modalIsOpen);
+
+  // The list hides behind any address that names a mod, and a mod the catalog
+  // does not have has no page: send that address to the list, once the catalog
+  // is in hand (a mod still being fetched is not one it lacks).
+  const catalogLacksDisplayedMod =
+    !!displayedModId && !!repositoryMods && !repositoryMods[displayedModId];
+  useEffect(() => {
+    if (catalogLacksDisplayedMod) {
+      navigate(MODS_PATH, { replace: true });
+    }
+  }, [catalogLacksDisplayedMod, navigate]);
+
+  if (initialDataPending) {
+    return (
+      <CenteredContainer>
+        <CenteredContent>
+          <ProgressSpin size="large" tip={t('general.status.loading')} />
+        </CenteredContent>
+      </CenteredContainer>
+    );
+  }
+
+  if (!repositoryMods) {
+    return (
+      <CenteredContainer>
+        <CenteredContent>
+          <Result
+            status="error"
+            title={t('general.status.loadingFailedTitle')}
+            subTitle={t('general.status.loadingFailedSubtitle')}
+            extra={
+              onRetry
+                ? [
+                  <Button
+                    type="primary"
+                    key="try-again"
+                    onClick={onRetry}
+                  >
+                    {t('general.status.tryAgain')}
+                  </Button>,
+                ]
+                : []
+            }
+          />
+        </CenteredContent>
+      </CenteredContainer>
+    );
+  }
+
+  return (
+    <>
+      <ContentWrapper
+        id="ModsBrowserOnline-ContentWrapper"
+        $hidden={!!displayedModId}
+      >
+        <ModsContainer $extraBottomPadding={!devModeOptOut}>
+          <SearchFilterContainer>
+            <SearchFilterInput
+              ref={searchInputRef}
+              autoFocus={!isMobile}
+              data-testid="mods-search"
+              prefix={<FontAwesomeIcon icon={faSearch} />}
+              placeholder={t(isMobile || searchInputFocused ? 'modSearch.placeholder' : 'modSearch.placeholderWithHint') as string}
+              allowClear
+              value={filterText}
+              onChange={(e) => {
+                resetInfiniteScrollLoadedItems();
+                setFilterText(e.target.value);
+              }}
+              onFocus={() => setSearchInputFocused(true)}
+              onBlur={() => setSearchInputFocused(false)}
+            />
+            <DropdownModal
+              placement="bottomRight"
+              trigger={['click']}
+              arrow={true}
+              open={filterDropdownOpen}
+              onOpenChange={setFilterDropdownOpen}
+              dropdownRender={(menu) => <FilterMenu>{menu}</FilterMenu>}
+              menu={{
+                style: { maxHeight: '400px', overflowY: 'overlay' },
+                items: [
+                  ...(showInstallationFilter ? [{
+                    type: 'group' as const,
+                    label: t('explore.filter.installationStatus'),
+                    children: [
+                      {
+                        label: t('explore.filter.installed'),
+                        key: 'installed',
+                      },
+                      {
+                        label: t('explore.filter.notInstalled'),
+                        key: 'not-installed',
+                      },
+                    ],
+                  }] : []),
+                  {
+                    type: 'group',
+                    label: (
+                      <FilterGroupTitle>
+                        <span>{t('explore.filter.author')}</span>
+                        <Tooltip title={authorOrderLabel}>
+                          <FilterGroupOrderButton
+                            type="link"
+                            size="small"
+                            aria-label={authorOrderLabel}
+                            data-testid="mods-filter-author-order"
+                            onClick={() =>
+                              setAuthorOrder(authorOrder === 'users' ? 'alphabetical' : 'users')
+                            }
+                          >
+                            <FontAwesomeIcon
+                              icon={authorOrder === 'users' ? faArrowDownWideShort : faArrowDownAZ}
+                            />
+                          </FilterGroupOrderButton>
+                        </Tooltip>
+                      </FilterGroupTitle>
+                    ),
+                    children: [
+                      ...(showAllAuthors ? authorFilters : authorFilters.slice(0, 5)).map(author => ({
+                        label: author.name,
+                        key: author.key,
+                      })),
+                      ...(authorFilters.length > 5 && !showAllAuthors ? [{
+                        label: t('explore.filter.showMore'),
+                        key: 'show-more-authors',
+                      }] : []),
+                    ],
+                  },
+                  {
+                    type: 'group',
+                    label: t('explore.filter.process'),
+                    children: [
+                      ...(showAllProcesses ? processFilters : processFilters.slice(0, 5)).map(process => ({
+                        label: <FilterItemLabel label={process.name} count={process.count} />,
+                        key: process.key,
+                      })),
+                      ...(processFilters.length > 5 && !showAllProcesses ? [{
+                        label: t('explore.filter.showMore'),
+                        key: 'show-more-processes',
+                      }] : []),
+                    ],
+                  },
+                  {
+                    type: 'group',
+                    className: FILTER_MENU_FOOTER_CLASS,
+                    children: [
+                      {
+                        type: 'divider',
+                      },
+                      {
+                        label: t('explore.filter.clearFilters'),
+                        key: 'clear-filters',
+                      },
+                    ],
+                  },
+                ],
+                selectedKeys: Array.from(filterOptions),
+                onClick: (e) => {
+                  if (e.key === 'clear-filters') {
+                    handleClearFilters();
+                    setFilterDropdownOpen(false);
+                    resetInfiniteScrollLoadedItems();
+                  } else if (e.key === 'show-more-authors') {
+                    setShowAllAuthors(true);
+                  } else if (e.key === 'show-more-processes') {
+                    setShowAllProcesses(true);
+                  } else {
+                    handleFilterChange(e.key);
+                    resetInfiniteScrollLoadedItems();
+                    // Keep dropdown open for filter changes
+                  }
+                },
+              }}
+            >
+              <IconButton
+                type={filterOptions.size > 0 ? 'primary' : undefined}
+                data-testid="mods-filter"
+              >
+                <FontAwesomeIcon icon={faFilter} />
+              </IconButton>
+            </DropdownModal>
+            <DropdownModal
+              placement="bottomRight"
+              trigger={['click']}
+              arrow={true}
+              menu={{
+                items: [
+                  {
+                    label: t('explore.search.popularAndTopRated'),
+                    key: 'popular-top-rated',
+                  },
+                  { label: t('explore.search.trending'), key: 'trending' },
+                  { label: t('explore.search.popular'), key: 'popular' },
+                  { label: t('explore.search.topRated'), key: 'top-rated' },
+                  { label: t('explore.search.newest'), key: 'newest' },
+                  {
+                    label: t('explore.search.lastUpdated'),
+                    key: 'last-updated',
+                  },
+                  {
+                    label: t('explore.search.alphabeticalOrder'),
+                    key: 'alphabetical',
+                  },
+                ],
+                selectedKeys: [sortingOrder],
+                onClick: (e) => {
+                  resetInfiniteScrollLoadedItems();
+                  setSortingOrder(e.key);
+                },
+              }}
+            >
+              <IconButton data-testid="mods-sort">
+                <FontAwesomeIcon icon={faSort} />
+              </IconButton>
+            </DropdownModal>
+          </SearchFilterContainer>
+          {installedModsFilteredAndSorted.length === 0 ? (
+            <ResultsMessageWrapper>
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={t('modSearch.noResults')}
+              />
+            </ResultsMessageWrapper>
+          ) : (
+            <>
+              <ModsGrid data-testid="repository-mods">
+                {installedModsFilteredAndSorted
+                  .slice(0, infiniteScrollLoadedItems)
+                  .map(([modId, mod]) => {
+                    // Normalize mod structure using helper functions
+                    const modMetadata = getModMetadata(mod);
+                    const repositoryDetails = getModDetails(mod);
+                    const installedDetails = installedMods?.[modId];
+
+                    return (
+                      <ModCard
+                        key={modId}
+                        modId={modId}
+                        ribbonText={
+                          installedDetails
+                            ? modHasUpdateOnOffer(modId, installedDetails)
+                              ? (t('mod.updateAvailable') as string)
+                              : (t('mod.installed') as string)
+                            : undefined
+                        }
+                        title={modMetadata.name || modId}
+                        description={modMetadata.description}
+                        modMetadata={modMetadata}
+                        repositoryDetails={repositoryDetails}
+                        buttons={[
+                          /// #if WEBSITE
+                          {
+                            type: 'navigate',
+                            text: t('mod.details'),
+                            testId: 'mod-card-details',
+                            href: MODS_PATH + '/' + modId,
+                            onClick: () => setDetailsButtonClicked(true),
+                          },
+                          /// #else
+                          {
+                            type: 'action',
+                            text: t('mod.details'),
+                            testId: 'mod-card-details',
+                            onClick: () => {
+                              setDetailsButtonClicked(true);
+                              navigate(MODS_PATH + '/' + modId);
+                            },
+                          },
+                          /// #endif
+                        ]}
+                      />
+                    );
+                  })}
+              </ModsGrid>
+              <div ref={sentinelRef as React.RefObject<HTMLDivElement>} aria-hidden="true" />
+            </>
+          )}
+        </ModsContainer>
+      </ContentWrapper>
+      {displayedModId && repositoryMods && repositoryMods[displayedModId] && (
+        <ContentWrapper>
+          <ModDetails
+            modId={displayedModId}
+            repositoryModDetails={{
+              metadata: getModMetadata(repositoryMods[displayedModId]),
+              details: getModDetails(repositoryMods[displayedModId]),
+            }}
+            goBack={() => {
+              // Back through the history when this page was pushed over one
+              // the reader was on in the app: by this list's own Details
+              // button, or by a link followed from another mod's page, which
+              // says so in the location's state. Reached any other way - a
+              // windhawk:// link, a cold start, the website's address bar - the
+              // page has nothing of the reader's behind it, and back leads to
+              // the list.
+              if (detailsButtonClicked || isModPageFromApp(location.state)) {
+                navigate(-1);
+              } else {
+                navigate(MODS_PATH);
+              }
+            }}
+            // Only pass appProps in the app build
+            appProps={modDetailsAppProps}
+          />
+        </ContentWrapper>
+      )}
+      <ModOperationModal
+        installModPending={installModPending}
+        compileModPending={compileModPending}
+        operation={modOperation}
+        onCancel={onCancelModOperation}
+      />
+    </>
+  );
+}

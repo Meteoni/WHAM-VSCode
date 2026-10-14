@@ -1,0 +1,7 @@
+{
+  "command": "captureHotkey",
+  "type": "reply",
+  "data": {
+    "hotkey": "ctrl+alt+116"
+  }
+}

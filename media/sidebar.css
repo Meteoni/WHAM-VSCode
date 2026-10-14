@@ -1,6 +1,6 @@
-/* Keep tab widths stable when a longer screen needs vertical scrolling. */
-html { scrollbar-gutter: stable; }
-body { margin: 0; padding: 12px; color: var(--vscode-foreground); font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, sans-serif); }
+/* Scroll content below the full-width navigation, matching the details pane. */
+html, body { height: 100%; margin: 0; }
+body { display: flex; flex-direction: column; padding: 0; color: var(--vscode-foreground); font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, sans-serif); }
 [hidden] { display: none !important; }
 h1 { font-size: 18px; line-height: 1.35; margin: 18px 0 8px; font-weight: 600; overflow-wrap: anywhere; }
 h2 { font-size: 13px; margin: 20px 0 8px; } h2 span { margin-left: 5px; color: var(--vscode-descriptionForeground); }
@@ -21,6 +21,7 @@ nav button:last-child { border-right: 0; }
 nav button:hover:not(:disabled) { background: var(--vscode-tab-hoverBackground, var(--vscode-toolbar-hoverBackground)); color: var(--vscode-tab-hoverForeground, var(--vscode-foreground)); }
 nav button[aria-current="page"] { background: var(--vscode-tab-activeBackground, var(--vscode-input-background)); color: var(--vscode-tab-activeForeground, var(--vscode-foreground)); border-top-color: var(--vscode-tab-activeBorderTop, var(--vscode-focusBorder)); }
 nav button:focus-visible { outline-offset: -3px; }
+.settings-scope { margin-bottom: 14px; }
 .setup-options { display: grid; gap: 10px; margin: 20px 0; }
 .setup-options button { display: block; text-align: left; padding: 12px; }
 .setup-options strong, .setup-options span { display: block; } .setup-options span { font-size: 12px; margin-top: 5px; color: var(--vscode-descriptionForeground); }
@@ -38,3 +39,49 @@ nav button:focus-visible { outline-offset: -3px; }
 dt { font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 10px; }
 dd { margin: 2px 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 pre { padding: 10px; background: var(--vscode-textCodeBlock-background); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 var(--vscode-editor-font-family, monospace); }
+
+.entry-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.entry-source-info { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }
+.entry-source-info p { margin: 0; }
+.compile-split { display: flex; margin-left: auto; flex-shrink: 0; }
+.compile-split > .primary { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.compile-split .compile-menu > summary { display: flex; align-items: center; justify-content: center; height: 26px; box-sizing: border-box; width: 22px; padding: 2px; border-radius: 0 4px 4px 0; border-color: var(--vscode-button-border, transparent); border-left-color: var(--vscode-contrastBorder, color-mix(in srgb, var(--vscode-button-foreground) 25%, transparent)); color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
+.compile-split .compile-menu > summary:hover { background: var(--vscode-button-hoverBackground); }
+.compile-menu svg { width: 16px; height: 16px; }
+.mods-heading { display: flex; align-items: center; gap: 8px; margin-top: 20px; }
+.mods-heading h2 { margin: 0; }
+.mods-heading .toolbar { margin: 0 0 0 auto; flex-wrap: nowrap; align-items: center; }
+.log-button { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: 0; padding: 4px; background: none; }
+.log-button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground); }
+.log-button svg { width: 16px; height: 16px; }
+.project-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0 4px; }
+.project-heading label { margin: 0; }
+.folder-button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px; }
+.folder-button svg { width: 16px; height: 16px; }
+#mod-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#mod-actions .toolbar { margin: 9px 0; }
+.more-menu { position: relative; }
+.more-menu > summary { list-style: none; border: 1px solid var(--vscode-button-secondaryBorder, var(--vscode-panel-border)); border-radius: 4px; padding: 3px 12px; line-height: 18px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, var(--vscode-input-background)); }
+.more-menu > summary::-webkit-details-marker { display: none; }
+.more-actions { position: fixed; z-index: 10; min-width: 150px; padding: 4px; border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); background: var(--vscode-menu-background, var(--vscode-sideBar-background)); }
+.more-actions button { display: block; width: 100%; border: 0; text-align: left; white-space: nowrap; }
+.runtime-toggle { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; cursor: pointer; }
+.runtime-toggle input { appearance: none; flex: none; position: relative; width: 28px; height: 16px; padding: 0; margin: 0; border: 1px solid var(--vscode-button-secondaryBorder, var(--vscode-panel-border)); border-radius: 10px; background: var(--vscode-input-background); cursor: pointer; }
+.runtime-toggle input::before { content: ''; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-foreground); }
+.runtime-toggle input:checked { background: var(--vscode-button-background); }
+.runtime-toggle input:checked::before { left: 14px; background: var(--vscode-button-foreground); }
+.runtime-toggle input:disabled { opacity: .45; cursor: default; }
+
+.main-navigation { flex-shrink: 0; margin: 12px 12px 14px; }
+#wham-pages { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 0 12px 12px; }
+.compile-split > .primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.compile-split > .primary[aria-busy="true"] { opacity: 1; }
+.compile-spinner { width: 12px; height: 12px; flex-shrink: 0; box-sizing: border-box; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: wham-compile-spin 1s linear infinite; }
+@keyframes wham-compile-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .compile-spinner { animation: none; } }
+
+.build-indicator { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; font: normal normal 16px/1 wham-codicon; }
+
+.git-files { margin: 8px 0 16px; padding-left: 18px; font-size: 12px; }
+.git-files li { margin: 3px 0; overflow-wrap: anywhere; }
+.git-files code { font-family: var(--vscode-editor-font-family, monospace); font-size: inherit; }

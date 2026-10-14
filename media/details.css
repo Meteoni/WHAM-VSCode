@@ -1,0 +1,42 @@
+html, body { height: 100%; margin: 0; }
+body { display: flex; flex-direction: column; padding: 0; color: var(--vscode-foreground); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, sans-serif); }
+#wham-header { flex-shrink: 0; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+#wham-header, #wham-header * { box-sizing: border-box; }
+[hidden] { display: none !important; }
+.wham-toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--vscode-panel-border); color: var(--vscode-foreground); font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, sans-serif); }
+.right-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+#refresh { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+#refresh.refresh-pending::after { content: ''; position: absolute; width: 6px; height: 6px; right: 9px; bottom: 5px; border-radius: 50%; background: var(--vscode-editorWarning-foreground, #e9a700); box-shadow: 0 0 0 2px var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+.wham-toolbar .action-group, #mod-tools { display: flex; align-items: center; gap: 6px; }
+.wham-toolbar button { cursor: pointer; height: 28px; padding: 4px 8px; border: 1px solid var(--vscode-button-secondaryBorder, var(--vscode-panel-border)); background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; line-height: 18px; border-radius: 3px; }
+.wham-toolbar .icon-button, .more-menu > summary { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 28px; height: 28px; padding: 4px; border: 0; border-radius: 3px; background: none; color: var(--vscode-foreground); cursor: pointer; }
+.wham-toolbar svg { width: 16px; height: 16px; flex-shrink: 0; }
+.wham-toolbar button:disabled { opacity: .45; cursor: default; }
+.wham-toolbar :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.wham-navigation { display: flex; margin: 12px 12px 0; border-bottom: 1px solid var(--vscode-panel-border); }
+.wham-navigation button { flex: 1; min-width: 0; padding: 6px 8px; border: 0; border-top: 2px solid transparent; border-right: 1px solid var(--vscode-panel-border); background: var(--vscode-tab-inactiveBackground, transparent); color: var(--vscode-tab-inactiveForeground, var(--vscode-foreground)); font: var(--vscode-font-size, 13px)/18px var(--vscode-font-family, sans-serif); cursor: pointer; }
+.wham-navigation button:last-child { border-right: 0; }
+.wham-navigation button[aria-current="page"] { border-top-color: var(--vscode-focusBorder); color: var(--vscode-tab-activeForeground, var(--vscode-foreground)); background: var(--vscode-tab-activeBackground, transparent); }
+.more-menu { position: relative; }
+.more-menu > summary { list-style: none; }
+.more-menu > summary:hover, .wham-toolbar .icon-button:hover { background: var(--vscode-toolbar-hoverBackground); }
+.more-menu > summary::-webkit-details-marker { display: none; }
+.more-actions { position: fixed; min-width: 150px; z-index: 100; padding: 4px; border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); background: var(--vscode-menu-background, var(--vscode-editor-background)); box-shadow: 0 2px 8px var(--vscode-widget-shadow, #0005); }
+.wham-toolbar .more-actions button { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; white-space: nowrap; background: none; }
+.wham-toolbar .more-actions button:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-button-secondaryHoverBackground)); }
+#wham-loading { margin: 12px; color: var(--vscode-descriptionForeground); font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, sans-serif); }
+#wham-error { flex-shrink: 0; margin: 0; padding: 4px 16px; color: var(--vscode-errorForeground); background: var(--vscode-editor-background); }
+#wham-error:empty { display: none; }
+#root { flex: 1; min-height: 0; }
+#root > div { height: calc(100dvh - var(--wham-toolbar-height, 47px)); }
+#root [data-testid="mod-details"], #root div:has(> [data-testid="mod-details"]) { padding: 0; max-width: none; }
+/* This adapter targets the renderer version recorded in pin.json. */
+#root :is([data-testid="app-header"], [data-testid="create-new-mod"], [data-testid="mod-details-back"], [data-testid="mod-actions"], [data-testid="mod-details-reviews"], [data-testid="mod-details-not-installed"], [data-testid="mod-details-open-in-browser"], [data-testid="mod-details-share"]),
+#root [data-testid="mod-details"] .ant-card-meta-title .ant-radio-group,
+#root .ant-tabs-tab:has(:is([data-testid="mod-details-tab-code"], [data-testid="mod-details-tab-advanced"], [data-testid="mod-details-tab-changes"], [data-testid="mod-details-tab-changelog"])) { display: none !important; }
+@media (max-width: 320px) {
+  .wham-toolbar { padding: 8px; }
+  .wham-toolbar, .wham-toolbar .action-group, #mod-tools, .right-actions { gap: 4px; }
+  .wham-toolbar button { padding: 4px; }
+  .wham-toolbar .icon-button, .more-menu > summary { width: 24px; }
+}

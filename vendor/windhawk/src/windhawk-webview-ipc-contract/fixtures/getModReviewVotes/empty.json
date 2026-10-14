@@ -1,0 +1,8 @@
+{
+  "command": "getModReviewVotes",
+  "type": "reply",
+  "data": {
+    "modId": "taskbar-clock-customization",
+    "votes": []
+  }
+}

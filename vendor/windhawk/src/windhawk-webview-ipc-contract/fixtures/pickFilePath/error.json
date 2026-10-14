@@ -1,0 +1,10 @@
+{
+  "command": "pickFilePath",
+  "type": "reply",
+  "data": {
+    "error": {
+      "code": "INTERNAL",
+      "message": "file dialog: CoCreateInstance: Class not registered (0x80040154)"
+    }
+  }
+}

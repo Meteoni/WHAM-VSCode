@@ -1,0 +1,17 @@
+{
+  "command": "getModReviewVotes",
+  "type": "reply",
+  "data": {
+    "modId": "taskbar-clock-customization",
+    "votes": [
+      {
+        "reviewId": 112,
+        "timestamp": 1757900000
+      },
+      {
+        "reviewId": 222,
+        "timestamp": 1758000000
+      }
+    ]
+  }
+}

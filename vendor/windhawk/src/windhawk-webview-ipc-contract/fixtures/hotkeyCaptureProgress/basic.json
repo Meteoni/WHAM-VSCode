@@ -1,0 +1,12 @@
+{
+  "command": "hotkeyCaptureProgress",
+  "type": "event",
+  "data": {
+    "modifiers": {
+      "ctrl": true,
+      "alt": true,
+      "shift": false,
+      "win": false
+    }
+  }
+}

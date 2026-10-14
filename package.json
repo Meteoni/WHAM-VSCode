@@ -2,51 +2,148 @@
   "name": "windhawk-amalgamation",
   "displayName": "WHAM: Windhawk Source Amalgamation",
   "description": "Build standalone Windhawk mods and recover their editable source trees, with per-project sidebar controls.",
-  "version": "1.2.2",
-  "publisher": "windhawk-tools",
+  "version": "1.5.5",
+  "publisher": "Meteoni",
   "license": "MIT AND GPL-3.0-only",
-  "engines": { "vscode": "^1.95.0", "node": ">=20" },
-  "categories": ["Other"],
+  "engines": {
+    "vscode": "^1.95.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other"
+  ],
   "main": "./dist/extension.js",
-  "bin": { "wham": "./dist/cli.js" },
-  "activationEvents": ["onStartupFinished"],
-  "capabilities": { "untrustedWorkspaces": { "supported": false }, "virtualWorkspaces": false },
+  "bin": {
+    "wham": "./dist/cli.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": false
+  },
   "scripts": {
     "build": "tsc -p .",
+    "build:bridge": "node scripts/build-bridge.cjs",
     "test": "npm run build && node --test test/*.test.cjs",
-    "package": "vsce package --allow-missing-repository --no-rewrite-relative-links",
-    "vscode:prepublish": "npm run build"
+    "package": "vsce package --githubBranch main --baseImagesUrl https://raw.githubusercontent.com/Meteoni/WHAM-VSCode/main",
+    "vscode:prepublish": "npm run build && npm run build:bridge"
   },
-  "dependencies": { "minimatch": "^10.0.1", "jsonc-parser": "^3.3.1", "yaml": "^2.8.1" },
-  "devDependencies": { "@types/node": "^22.0.0", "@types/vscode": "^1.95.0", "@vscode/vsce": "^3.2.1", "typescript": "^5.7.2" },
+  "dependencies": {
+    "minimatch": "^10.0.1",
+    "jsonc-parser": "^3.3.1",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.7.2"
+  },
   "contributes": {
     "configuration": {
       "title": "WHAM",
       "properties": {
-        "wham.createInitialCommit": { "type": "boolean", "default": false, "description": "Create an initial commit after new/recovered project setup, only if WHAM initializes the repository. Uses your configured Git identity." },
-        "wham.openProjectAfterSetup": { "type": "boolean", "default": true, "description": "Open the initialized or recovered project in the current window after setup so its editor configuration is active." }
+        "wham.createInitialCommit": {
+          "scope": "application",
+          "type": "boolean",
+          "default": false,
+          "description": "Create an initial commit after new/recovered project setup, only if WHAM initializes the repository. Uses your configured Git identity."
+        },
+        "wham.openProjectAfterSetup": {
+          "scope": "application",
+          "type": "boolean",
+          "default": true,
+          "description": "Open the initialized or recovered project in the current window after setup so its editor configuration is active."
+        }
       }
     },
-    "viewsContainers": { "activitybar": [{ "id": "windhawk", "title": "WHAM", "icon": "media/windhawk.svg" }] },
-    "views": { "windhawk": [{ "type": "webview", "id": "windhawk.projects", "name": "Projects" }] },
-    "grammars": [{
-      "injectTo": ["source.cpp"],
-      "scopeName": "source.cpp.wham",
-      "path": "./syntaxes/windhawk.injection.json",
-      "embeddedLanguages": { "meta.embedded.block.yaml": "yaml", "meta.embedded.block.markdown": "markdown" }
-    }],
-    "commands": [
-      { "command": "windhawk.openProject", "title": "WHAM: Open Project" },
-      { "command": "windhawk.initialize", "title": "WHAM: Initialize Project" },
-      { "command": "windhawk.configureEditor", "title": "WHAM: Configure Compiler and Indentation" },
-      { "command": "windhawk.generateAll", "title": "WHAM: Generate All Mods" },
-      { "command": "windhawk.generateCurrent", "title": "WHAM: Generate Current Mod" },
-      { "command": "windhawk.restore", "title": "WHAM: Restore Project from .wh.cpp" },
-      { "command": "windhawk.compare", "title": "WHAM: Compare Generated Output" },
-      { "command": "windhawk.toggleOnSave", "title": "WHAM: Toggle Generate on Save" },
-      { "command": "windhawk.verify", "title": "WHAM: Verify Generated Mod with Compiler" },
-      { "command": "windhawk.logs", "title": "WHAM: Show Generation Log" }
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "windhawk",
+          "title": "WHAM",
+          "icon": "media/windhawk.svg"
+        }
+      ]
+    },
+    "views": {
+      "windhawk": [
+        {
+          "type": "webview",
+          "id": "windhawk.projects",
+          "name": "Projects"
+        }
+      ]
+    },
+    "grammars": [
+      {
+        "injectTo": [
+          "source.cpp"
+        ],
+        "scopeName": "source.cpp.wham",
+        "path": "./syntaxes/windhawk.injection.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.yaml": "yaml",
+          "meta.embedded.block.markdown": "markdown"
+        }
+      }
     ],
-    "jsonValidation": [{ "fileMatch": "windhawk-amalgamation.json", "url": "./config.schema.json" }]
-  }
+    "commands": [
+      {
+        "command": "windhawk.openProject",
+        "title": "WHAM: Open Project"
+      },
+      {
+        "command": "windhawk.initialize",
+        "title": "WHAM: Initialize Project"
+      },
+      {
+        "command": "windhawk.configureEditor",
+        "title": "WHAM: Configure Compiler and Indentation"
+      },
+      {
+        "command": "windhawk.generateAll",
+        "title": "WHAM: Generate All Mods"
+      },
+      {
+        "command": "windhawk.generateCurrent",
+        "title": "WHAM: Generate Current Mod"
+      },
+      {
+        "command": "windhawk.restore",
+        "title": "WHAM: Restore Project from .wh.cpp"
+      },
+      {
+        "command": "windhawk.compare",
+        "title": "WHAM: Compare Generated Output"
+      },
+      {
+        "command": "windhawk.toggleOnSave",
+        "title": "WHAM: Toggle Generate on Save"
+      },
+      {
+        "command": "windhawk.verify",
+        "title": "WHAM: Verify Generated Mod with Compiler"
+      },
+      {
+        "command": "windhawk.logs",
+        "title": "WHAM: Show Generation Log"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": "windhawk-amalgamation.json",
+        "url": "./config.schema.json"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Meteoni/WHAM-VSCode.git"
+  },
+  "icon": "media/wham-icon.png"
 }

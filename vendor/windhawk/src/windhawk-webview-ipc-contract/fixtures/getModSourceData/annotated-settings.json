@@ -1,0 +1,154 @@
+{
+  "command": "getModSourceData",
+  "type": "reply",
+  "data": {
+    "modId": "example@1",
+    "data": {
+      "source": "// ==WindhawkMod==\n// @id example\n// ==/WindhawkMod==\n",
+      "metadata": {
+        "name": "Example",
+        "version": "1.0"
+      },
+      "readme": null,
+      "initialSettings": [
+        {
+          "key": "overlayColor",
+          "value": "#80FFFFFF",
+          "name": "Overlay color",
+          "format": "colorArgb"
+        },
+        {
+          "key": "soundFile",
+          "value": "",
+          "name": "Sound file",
+          "format": "filePath"
+        },
+        {
+          "key": "opacity",
+          "value": "0.85",
+          "name": "Opacity",
+          "float": true
+        },
+        {
+          "key": "weights",
+          "value": ["0.25", "1", "1000"],
+          "float": true
+        },
+        {
+          "key": "monitor",
+          "value": "none",
+          "options": [
+            { "none": "None" }
+          ],
+          "dynamicSelect": true
+        },
+        {
+          "key": "logFolder",
+          "value": "",
+          "name": "Log folder",
+          "format": "folderPath"
+        },
+        {
+          "key": "font",
+          "value": "Segoe UI",
+          "name": "Font",
+          "format": "fontFamily"
+        },
+        {
+          "key": "toggleHotkey",
+          "value": "ctrl+alt+84",
+          "name": "Toggle hotkey",
+          "format": "hotkey"
+        },
+        {
+          "key": "rating",
+          "value": 3,
+          "name": "Rating",
+          "min": 1,
+          "max": 5
+        },
+        {
+          "key": "scale",
+          "value": "1.5",
+          "float": true,
+          "min": 0.5
+        },
+        {
+          "key": "plain",
+          "value": 1
+        },
+        {
+          "key": "fadeEnabled",
+          "value": false,
+          "name": "Fade"
+        },
+        {
+          "key": "fadeDelay",
+          "value": 100,
+          "name": "Fade delay",
+          "showIf": { "fadeEnabled": [true] }
+        },
+        {
+          "key": "size",
+          "value": 150,
+          "name": "Size",
+          "hideIf": { "fadeEnabled": [true] }
+        },
+        {
+          "key": "mode",
+          "value": "a",
+          "options": [
+            { "a": "A" },
+            { "b": "B" },
+            { "c": "C" }
+          ]
+        },
+        {
+          "key": "excluded",
+          "value": [""],
+          "showIf": { "mode": ["a", "b"] }
+        },
+        {
+          "key": "group",
+          "value": [
+            {
+              "key": "enabled",
+              "value": false
+            },
+            {
+              "key": "inner",
+              "value": [
+                {
+                  "key": "color",
+                  "value": "FFFFFF",
+                  "showIf": { "group.enabled": [true] }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "key": "rows",
+          "value": [
+            [
+              {
+                "key": "action",
+                "value": "a",
+                "options": [
+                  { "a": "A" },
+                  { "b": "B" },
+                  { "c": "C" }
+                ]
+              },
+              {
+                "key": "args",
+                "value": "",
+                "showIf": { "rows.action": ["a", "b"] }
+              }
+            ]
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "command": "retractModReviewVote",
+  "type": "reply",
+  "data": {
+    "modId": "taskbar-clock-customization",
+    "votes": [
+      {
+        "reviewId": 222,
+        "timestamp": 1758000000
+      }
+    ],
+    "succeeded": true
+  }
+}

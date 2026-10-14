@@ -41,11 +41,11 @@ export async function readEditorSettings(root: string, saved: EditorSettings = e
   const insertSpaces = cppSettings['editor.insertSpaces'] ?? settings['editor.insertSpaces'];
   const formatDocument = parseAllDocuments(contents[2])[0];
   const format = formatDocument && !formatDocument.errors.length && isMap(formatDocument.contents) ? formatDocument.toJS() : {};
-  const indentSize = width ?? format.IndentWidth;
+  const indentSize = format.IndentWidth ?? width;
   if (Number.isInteger(indentSize) && indentSize >= 1 && indentSize <= 16) result.indentSize = indentSize;
-  if (typeof insertSpaces === 'boolean') result.indentStyle = insertSpaces ? 'spaces' : 'tabs';
-  else if (format.UseTab === 'Never') result.indentStyle = 'spaces';
+  if (format.UseTab === 'Never') result.indentStyle = 'spaces';
   else if (['Always', 'ForIndentation', 'ForContinuationAndIndentation', 'AlignWithSpaces'].includes(format.UseTab)) result.indentStyle = 'tabs';
+  else if (typeof insertSpaces === 'boolean') result.indentStyle = insertSpaces ? 'spaces' : 'tabs';
   return result;
 }
 
@@ -141,7 +141,7 @@ export async function findWindhawk(): Promise<string[]> {
 }
 
 /** Produce reviewable configuration files; adapters approve replacements of existing owned keys. */
-export async function editorConfiguration(project: Project, input: EditorSettings): Promise<Map<string, Buffer>> {
+export async function editorConfiguration(project: Project, input: EditorSettings, baselineFlags?: string[]): Promise<Map<string, Buffer>> {
   if (!input || !['cpp', 'clangd', 'both'].includes(input.integration) || !['spaces', 'tabs'].includes(input.indentStyle) ||
     !Number.isInteger(input.indentSize) || input.indentSize < 1 || input.indentSize > 16 || typeof input.installationPath !== 'string') throw new Error('Invalid editor settings. Indentation size must be 1–16.');
   const result = new Map<string, Buffer>();
@@ -192,7 +192,7 @@ export async function editorConfiguration(project: Project, input: EditorSetting
       if (!Array.isArray(configurations)) throw new Error('c_cpp_properties.configurations must be an array.');
       const windhawk = {
         name: 'Windhawk (WHAM)', compilerPath: forward(compiler), intelliSenseMode: 'windows-clang-x64', cppStandard: 'c++23', cStandard: 'c17',
-        defines, forcedInclude: [forward(api)], compilerArgs: ['-target', 'x86_64-w64-mingw32'],
+        defines, forcedInclude: [forward(api)], compilerArgs: baselineFlags ? baselineFlags.map(flag => flag === 'windhawk_api.h' ? forward(api) : flag) : ['-target', 'x86_64-w64-mingw32'],
         includePath: ['${workspaceFolder}/' + project.config.sourceDirectory + '/**', ...includeDirectories, forward(path.join(install, 'Compiler', 'include'))]
       };
       const index = configurations.findIndex((item: { name?: string }) => item.name === windhawk.name);
@@ -205,7 +205,7 @@ export async function editorConfiguration(project: Project, input: EditorSetting
       const argumentsList = existingSettings['clangd.arguments'] ?? [];
       if (!Array.isArray(argumentsList) || argumentsList.some(item => typeof item !== 'string')) throw new Error('clangd.arguments must be an array of strings.');
       settings = edit(settings, [[['clangd.path'], forward(clangd)], [['clangd.arguments'], [...argumentsList.filter((item: string) => !item.startsWith('--query-driver=')), '--query-driver=' + forward(compiler)]]]);
-      const flags = ['-xc++', '-std=c++23', '--target=x86_64-w64-mingw32', ...defines.map(define => '-D' + define), '-include', forward(api),
+      const flags = [...(baselineFlags ? baselineFlags.map(flag => flag === 'windhawk_api.h' ? forward(api) : flag) : ['-xc++', '-std=c++23', '--target=x86_64-w64-mingw32', ...defines.map(define => '-D' + define), '-include', forward(api)]),
         ...project.config.includeDirectories.map(directory => '-I' + forward(path.resolve(project.root, directory))), '-I' + forward(path.join(install, 'Compiler', 'include'))];
       // A separate managed fragment keeps an existing .clangd file untouched.
       const existing = await read('.clangd');
