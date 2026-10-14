@@ -20,9 +20,10 @@ interface EntryState {
 }
 interface ProjectState {
   project: Project; entries: Map<string, EntryState>; queue: Promise<void>;
+  removed?: boolean; subscriptions?: vscode.Disposable[];
   pending: Set<string>; timer?: NodeJS.Timeout; error?: string; retained: string[];
   runtimeTimer?: NodeJS.Timeout; runtimePending?: boolean; pollInstalled?: boolean; draftPending: Set<string>; windhawk?: WindhawkInstallation; windhawkStamp?: string;
-  editor: EditorSettings; git?: Awaited<ReturnType<typeof gitStatus>>;
+  editor: EditorSettings; editorNeedsApply?: boolean; git?: Awaited<ReturnType<typeof gitStatus>>;
 }
 
 /** Bind the shared engine to workspace lifecycle, project queues, and the sidebar. */
@@ -32,6 +33,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 40);
   status.command = 'workbench.view.extension.windhawk'; status.show();
   const projects = new Map<string, ProjectState>();
+  const installedOperations = new Map<string, EntryState>();
   let sidebarDetails: { entry: string; controller: ReturnType<typeof createDetailsView> } | undefined;
   let sidebarHtml = '';
   let sidebarStateJson = '';
@@ -48,6 +50,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const openAfterSetup = () => vscode.workspace.getConfiguration('wham').get<boolean>('openProjectAfterSetup', true);
   const gitExecutable = () => vscode.workspace.getConfiguration('git').get<string>('path') || 'git';
   const sameFile = (left: string, right: string) => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+  const installedModKey = (root: string, id: string) => JSON.stringify([path.resolve(root).toLowerCase(), id]);
   const projectPreferences = (root: string) => localPreferences.projects[Object.keys(localPreferences.projects).find(key => sameFile(key, root)) ?? root] ?? {};
   const installationPreferences = (root: string): InstallationPreferences => localPreferences.computer.installations[path.resolve(root).toLowerCase()] ?? { elevation: 'none', gsudoPath: '' };
   const resolveEditor = async (root: string) => {
@@ -55,6 +58,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const overrides = projectPreferences(root);
     return { ...formatting, installationPath: localPreferences.computer.installationPath,
       integration: overrides.integration ?? localPreferences.computer.integration };
+  };
+  const refreshEditorConfiguration = async (state: ProjectState) => {
+    state.editorNeedsApply = true;
+    try {
+      const files = await editorConfiguration(state.project, state.editor, state.windhawk?.compileFlags);
+      for (const [file, expected] of files) {
+        const actual = await fs.readFile(path.join(state.project.root, file));
+        if (!actual.equals(expected)) return;
+      }
+      state.editorNeedsApply = false;
+    } catch { /* Missing files or invalid configuration still need Apply/Review. */ }
   };
   const dependsOn = (entry: EntryState, file: string) => sameFile(entry.path, file) ||
     [...((entry.draft ?? entry.result)?.dependencies.keys() ?? [])].some(dependency => sameFile(dependency, file)) ||
@@ -92,10 +106,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     status.text = '$(file-code) WHAM: ' + (state?.error ? 'configuration error' : statuses.includes('generating') ? 'generating' : statuses.includes('blocked') ? 'output edits' : statuses.some(value => value !== 'current') ? 'stale' : 'current');
     status.tooltip = state?.project.root ?? 'Initialize a Windhawk project';
     const sidebarState = { type: 'state', selected: state?.project.root,
-      page: pendingSidebarPage, computer: localPreferences.computer, openAfterSetup: openAfterSetup(), createInitialCommit: initialCommitEnabled(), projectChoices: projectChoices(), projects: [...projects.values()].map(item => ({ root: item.project.root, name: path.basename(item.project.root), config: item.project.config, editor: item.editor, local: projectPreferences(item.project.root), elevation: installationPreferences(item.editor.installationPath).elevation, git: item.git, windhawk: item.windhawk,
+      page: pendingSidebarPage, computer: localPreferences.computer, openAfterSetup: openAfterSetup(), createInitialCommit: initialCommitEnabled(), projectChoices: projectChoices(), projects: [...projects.values()].map(item => ({ root: item.project.root, name: path.basename(item.project.root), config: item.project.config, editor: item.editor, editorNeedsApply: item.editorNeedsApply, local: projectPreferences(item.project.root), elevation: installationPreferences(item.editor.installationPath).elevation, git: item.git, windhawk: item.windhawk,
         opened: !!vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, item.project.root)),
-        error: item.error, retained: item.retained, entries: [...item.entries.values()].map(entry => ({ path: entry.path, label: path.relative(path.join(item.project.root, item.project.config.sourceDirectory), entry.path),
-          status: entry.status, message: entry.message, metadata: entry.metadata, runtime: entry.runtime, output: outputPath(item.project, entry.path), dependencies: entry.draft?.dependencies.size ?? entry.result?.dependencies.size ?? 0 })) })) };
+        error: item.error, retained: item.retained, entries: [...item.entries.values()].map(entry => {
+          const owner = entry.runtime?.id && installedOperations.get(installedModKey(item.editor.installationPath, entry.runtime.id));
+          return { path: entry.path, label: path.relative(path.join(item.project.root, item.project.config.sourceDirectory), entry.path),
+          status: entry.status, message: entry.message, metadata: entry.metadata,
+          runtime: owner && owner !== entry ? { ...entry.runtime, busy: true, operation: owner.busy, stopping: owner.stopping } : entry.runtime,
+          output: outputPath(item.project, entry.path), dependencies: entry.draft?.dependencies.size ?? entry.result?.dependencies.size ?? 0 };
+        }) })) };
     sidebarStateJson = JSON.stringify(sidebarState).replace(/</g, '\\u003c');
     void view?.webview.postMessage(sidebarState);
   };
@@ -133,13 +152,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   // Draft preparation reads project source; it never queries installed mod state.
   const refreshDraft = async (state: ProjectState, entries = [...state.entries.values()]) => {
-    if (disposed) return;
+    if (disposed || state.removed) return;
     const root = state.editor.installationPath;
     const overlay = { ...nodeFiles, read: async (file: string) => {
       const document = vscode.workspace.textDocuments.find(document => document.isDirty && document.uri.scheme === 'file' && sameFile(document.uri.fsPath, file));
       return document ? Buffer.from(document.getText()) : nodeFiles.read(file);
     } };
     for (const entry of entries) {
+      if (state.removed) return;
       try {
         const source = (await overlay.read(entry.path)).toString(), language = previewLanguage(vscode.env?.language ?? 'en').toLowerCase();
         const hash = root + ':' + state.windhawkStamp + ':' + state.windhawk?.parser + ':' + language + ':' + checksum(Buffer.from(source));
@@ -206,7 +226,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   // Poll after runtime actions/focus changes, independently of source edits or preview refresh.
   const refreshRuntime = async (state: ProjectState) => {
-    if (disposed) return;
+    if (disposed || state.removed) return;
     const root = state.editor.installationPath;
     const stamp = root ? (await Promise.all(['windhawk-cli.exe', 'windhawk-core.dll'].map(async file => {
       try { const stat = await fs.stat(path.join(root, file)); return file + ':' + stat.size + ':' + stat.mtimeMs; } catch { return file + ':missing'; }
@@ -233,16 +253,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       entry.runtime.busy = !!entry.busy; entry.runtime.operation = entry.busy;
       entry.runtime.stopping = entry.stopping;
     }
+    await refreshEditorConfiguration(state);
     publish();
   };
   const scheduleRefresh = (state: ProjectState, pollInstalled = false, entries = [...state.entries.values()]) => {
+    if (disposed || state.removed) return;
     for (const entry of entries) state.draftPending.add(entry.path);
     state.pollInstalled ||= pollInstalled;
     if (state.runtimeTimer) clearTimeout(state.runtimeTimer);
     state.runtimeTimer = setTimeout(() => {
-      if (state.runtimePending || disposed) return;
+      if (state.runtimePending || disposed || state.removed) return;
       state.runtimePending = true;
       state.queue = state.queue.then(async () => {
+        if (disposed || state.removed) return;
         state.runtimePending = false;
         const poll = state.pollInstalled; state.pollInstalled = false;
         const entries = [...state.draftPending].map(file => state.entries.get(file)).filter((entry): entry is EntryState => !!entry);
@@ -253,8 +276,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }, 350);
   };
   const refresh = async (state: ProjectState) => {
+    if (disposed || state.removed) return;
     state.project = await loadProject(state.project.root);
     const entries = await discoverEntries(state.project, nodeFiles);
+    if (state.removed) return;
     for (const previous of [...state.entries.values()]) {
       const stillExists = entries.includes(previous.path);
       const nextOutput = stillExists ? outputPath(state.project, previous.path) : undefined;
@@ -264,6 +289,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const existing = await fs.readFile(output);
         if (previous.ownedHash === checksum(existing) && !vscode.workspace.textDocuments.some(document => sameFile(document.uri.fsPath, output) && document.isDirty)) {
           await assertSafeDestination(state.project.root, path.relative(state.project.root, output).split(path.sep).join('/'));
+          if (state.removed) return;
           await fs.rm(output); delete storedHashes[output];
         } else state.retained.push(`Preserved orphan output: ${output}`);
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') log.appendLine(String(error)); }
@@ -279,6 +305,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     presentDiagnostics();
   };
   const generate = async (state: ProjectState, entry: EntryState, force: boolean) => {
+    if (disposed || state.removed) return;
     const output = outputPath(state.project, entry.path);
     const dirtyOutput = vscode.workspace.textDocuments.find(document => sameFile(document.uri.fsPath, output) && document.isDirty);
     if (dirtyOutput) { entry.status = 'blocked'; entry.message = 'Output has unsaved edits. Save or revert it before regenerating.'; publish(); return; }
@@ -303,13 +330,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if ((now ? !existing || !now.equals(existing) : !!existing) || vscode.workspace.textDocuments.some(document => sameFile(document.uri.fsPath, output) && document.isDirty)) {
       entry.status = 'blocked'; entry.message = 'Output changed during generation; no write performed.'; return;
     }
+    if (disposed || state.removed) return;
     if (!existing?.equals(result.bytes)) await writeOutput(state.project, output, result.bytes);
     entry.ownedHash = checksum(result.bytes); storedHashes[output] = entry.ownedHash;
     entry.status = 'current'; entry.message = `${result.dependencies.size} source file(s)`;
   };
   const enqueue = (state: ProjectState, targets?: string[], force = false): Promise<void> => {
     state.queue = state.queue.then(async () => {
-      if (disposed) return;
+      if (disposed || state.removed) return;
       try {
         await refresh(state);
         for (const entry of state.entries.values()) {
@@ -325,6 +353,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return state.queue;
   };
   const schedule = (state: ProjectState, targets: string[]) => {
+    if (disposed || state.removed) return;
     for (const target of targets) state.pending.add(target);
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {
@@ -336,9 +365,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     for (const state of projects.values()) {
       if (!contained(state.project.root, file)) continue;
       const source = path.join(state.project.root, state.project.config.sourceDirectory), output = path.join(state.project.root, state.project.config.outputDirectory);
-      if (['.vscode/settings.json', '.vscode/c_cpp_properties.json', '.clang-format', '.clangd'].some(local => sameFile(file, path.join(state.project.root, local)))) {
+      if (['.vscode/settings.json', '.vscode/c_cpp_properties.json', '.vscode/extensions.json', '.clang-format', '.clangd'].some(local => sameFile(file, path.join(state.project.root, local)))) {
         state.queue = state.queue.then(async () => {
-          try { state.editor = await resolveEditor(state.project.root); publish(); }
+          if (disposed || state.removed) return;
+          try { state.editor = await resolveEditor(state.project.root); await refreshEditorConfiguration(state); publish(); }
           catch (error) { log.appendLine(String(error)); }
         });
         continue;
@@ -360,8 +390,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // New/deleted .cpp files change the entry list, not every existing mod's inputs.
       if (configurationChanged || discovery && /\.cpp$/i.test(file) && contained(source, file)) {
         state.queue = state.queue.then(async () => {
+          if (disposed || state.removed) return;
           try {
             await refresh(state);
+            if (configurationChanged) await refreshEditorConfiguration(state);
             const affected = [...state.entries.values()].filter(entry => configurationChanged || !entry.draft || targets.includes(entry));
             scheduleRefresh(state, false, affected);
             if (state.project.config.generate === 'onSave') schedule(state, affected.map(entry => entry.path));
@@ -378,6 +410,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const rememberProject = async (root: string) => {
     recentProjects = [root, ...recentProjects.filter(previous => !sameFile(previous, root))].slice(0, 15);
     await context.globalState.update('recentProjects', recentProjects);
+  };
+  const retireProject = (state: ProjectState) => {
+    state.removed = true;
+    if (state.timer) clearTimeout(state.timer);
+    if (state.runtimeTimer) clearTimeout(state.runtimeTimer);
+    state.pending.clear(); state.draftPending.clear(); state.pollInstalled = false;
+    for (const entry of state.entries.values()) entry.abort?.abort();
+    for (const subscription of state.subscriptions ?? []) subscription.dispose();
+    state.subscriptions = [];
+    projects.delete(state.project.root);
+    if (sidebarDetails && state.entries.has(sidebarDetails.entry)) {
+      sidebarDetails.controller.dispose(); sidebarDetails = undefined;
+      if (!disposed && view) view.webview.html = sidebarHtml;
+    }
+    if (!disposed) presentDiagnostics();
   };
   const addProject = async (root: string) => {
     root = path.resolve(root);
@@ -399,7 +446,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const state: ProjectState = { project: { root, config: { ...defaults } }, entries: new Map(), queue: Promise.resolve(), pending: new Set(), draftPending: new Set(), retained: [], editor: await resolveEditor(root) };
     projects.set(root, state);
     const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '**/*'));
-    context.subscriptions.push(watcher, watcher.onDidChange(uri => changed(uri.fsPath)), watcher.onDidCreate(uri => changed(uri.fsPath, true)), watcher.onDidDelete(uri => changed(uri.fsPath, true)));
+    state.subscriptions = [watcher, watcher.onDidChange(uri => changed(uri.fsPath)), watcher.onDidCreate(uri => changed(uri.fsPath, true)), watcher.onDidDelete(uri => changed(uri.fsPath, true))];
     try { await refresh(state); await refreshDraft(state); await rememberProject(root); scheduleRefresh(state, true); if (state.project.config.generate === 'onSave') {
       const stale = [...state.entries.values()].filter(entry => entry.status === 'stale').map(entry => entry.path);
       if (stale.length) void enqueue(state, stale);
@@ -430,19 +477,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     scheduleRefresh(state, false, [entry]);
   };
   const compileMod = async (state: ProjectState, entry: EntryState, testOnly = false) => {
-    if (entry.busy) return;
+    if (entry.busy || disposed || state.removed) return;
+    if (!testOnly && entry.runtime?.id && installedOperations.has(installedModKey(state.editor.installationPath, entry.runtime.id))) {
+      void vscode.window.showInformationMessage('This mod already has an operation running.'); return;
+    }
     if (!testOnly && !state.windhawk?.cli) { void vscode.window.showInformationMessage(state.windhawk?.notice ?? 'Select your Windhawk installation in Settings → Extension settings.'); return; }
     const abort = new AbortController(); entry.abort = abort; entry.stopping = false;
     entry.busy = testOnly ? 'test' : 'compile'; entry.buildError = undefined; if (entry.runtime) { entry.runtime.busy = true; entry.runtime.operation = entry.busy; entry.runtime.stopping = false; } publish();
     let snapshot: GenerationResult | undefined;
+    let operationKey: string | undefined;
     try {
       if (!await saveRelevant(state)) return;
       if (abort.signal.aborted) throw new WindhawkError('Compilation stopped.', 'CANCELED');
       if (testOnly) {
         snapshot = await generateEntry(state.project, entry.path, nodeFiles);
         if (!snapshot.bytes || snapshot.diagnostics.some(issue => issue.severity === 'error')) throw new Error(snapshot.diagnostics.map(issue => issue.message).join('\n'));
-        log.show(true);
-        await checkModBuild(state.editor.installationPath, snapshot.bytes.toString(), abort.signal, text => log.append(text), state.windhawk?.version);
+        const result = await checkModBuild(state.editor.installationPath, snapshot.bytes.toString(), abort.signal, text => log.append(text), state.windhawk?.version);
+        if (result?.warnings) log.show(true);
         entry.compilerDiagnostics = []; log.appendLine('Test build passed. No mod was installed.');
         void vscode.window.showInformationMessage('Test build passed.'); return;
       }
@@ -453,13 +504,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const id = parseMetadata(snapshot.bytes!.toString(), entry.path).fields.id?.[0];
       if (!id || !/^[a-z0-9-]+$/.test(id)) throw new Error('Add a valid @id before compiling.');
       const modId = 'local@' + id;
-      const installed = await readInstalledMod(state.windhawk!.root, modId);
+      const root = state.windhawk!.root, key = installedModKey(root, modId);
+      if (installedOperations.has(key)) { void vscode.window.showInformationMessage('This mod already has an operation running.'); return; }
+      operationKey = key; installedOperations.set(key, entry); publish();
+      const installed = await readInstalledMod(root, modId);
       const installDisabled = !installed.config || installed.config.disabled;
       log.appendLine(`Compile ${modId} from ${entry.path}`);
-      const result = await runWindhawkCli(state.windhawk!.root, ['mod', 'install', '--file', '-', ...(installDisabled ? ['--disabled'] : [])], snapshot.bytes!.toString(), text => log.append(text), abort.signal, installationPreferences(state.windhawk!.root));
+      const result = await runWindhawkCli(root, ['mod', 'install', '--file', '-', ...(installDisabled ? ['--disabled'] : [])], snapshot.bytes!.toString(), text => log.append(text), abort.signal, installationPreferences(root));
       if (result.id !== modId) throw new Error('Windhawk returned an unexpected compiled mod ID.');
       const library = result.config?.libraryFileName;
-      const key = JSON.stringify([path.resolve(state.windhawk!.root).toLowerCase(), modId]);
       const builds = { ...context.globalState.get<Record<string, { sourceHash: string; libraryFileName: string }>>('compiledSnapshots', {}) };
       if (typeof library === 'string' && library) builds[key] = { sourceHash: sourceHash(snapshot.bytes!.toString()), libraryFileName: library };
       else delete builds[key]; // An unsupported reply cannot retain a previous build's proof.
@@ -485,26 +538,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       void vscode.window.showErrorMessage(entry.buildError);
     } finally {
-      try { await refreshDraft(state, [entry]); if (!testOnly) await refreshRuntime(state); }
-      finally { entry.busy = undefined; entry.abort = undefined; entry.stopping = false; if (entry.runtime) { entry.runtime.busy = false; entry.runtime.operation = undefined; entry.runtime.stopping = false; } publish(); }
+      try {
+        await refreshDraft(state, [entry]);
+        if (!testOnly) for (const project of projects.values()) {
+          if (project === state || operationKey && [...project.entries.values()].some(peer => peer.runtime?.id && installedModKey(project.editor.installationPath, peer.runtime.id) === operationKey)) await refreshRuntime(project);
+        }
+      } finally {
+        if (operationKey && installedOperations.get(operationKey) === entry) installedOperations.delete(operationKey);
+        entry.busy = undefined; entry.abort = undefined; entry.stopping = false; if (entry.runtime) { entry.runtime.busy = false; entry.runtime.operation = undefined; entry.runtime.stopping = false; } publish();
+      }
     }
   };
   const enableMod = async (state: ProjectState, entry: EntryState, enabled: boolean) => {
-    if (entry.busy) return;
+    if (entry.busy || disposed || state.removed) return;
     if (!state.windhawk?.cli || !entry.runtime?.id || !entry.installed?.config) { void vscode.window.showInformationMessage(state.windhawk?.notice ?? 'Compile this mod before enabling it.'); return; }
+    const root = state.windhawk.root, modId = entry.runtime.id, key = installedModKey(root, modId);
+    if (installedOperations.has(key)) { void vscode.window.showInformationMessage('This mod already has an operation running.'); return; }
+    installedOperations.set(key, entry);
+    const abort = new AbortController(); entry.abort = abort;
     entry.busy = enabled ? 'enable' : 'disable'; entry.runtime.busy = true; entry.runtime.operation = entry.busy; publish();
     try {
-      const result = await runWindhawkCli(state.windhawk.root, ['mod', enabled ? 'enable' : 'disable', entry.runtime.id], undefined, undefined, undefined, installationPreferences(state.windhawk.root));
-      if (result?.id !== entry.runtime.id || result.enabled !== enabled) throw new Error('Windhawk returned an unsupported enable/disable response. Update Windhawk.');
+      const result = await runWindhawkCli(root, ['mod', enabled ? 'enable' : 'disable', modId], undefined, undefined, abort.signal, installationPreferences(root));
+      if (result?.id !== modId || result.enabled !== enabled) throw new Error('Windhawk returned an unsupported enable/disable response. Update Windhawk.');
       // The CLI confirms the change. Keep the installed source and Draft untouched.
-      entry.installed.config.disabled = !result.enabled;
-      entry.runtime.enabled = result.enabled;
-      entry.runtime.error = entry.buildError;
+      for (const project of projects.values()) if (sameFile(project.editor.installationPath, root)) for (const peer of project.entries.values()) {
+        if (peer.runtime?.id !== modId || !peer.installed?.config) continue;
+        peer.installed.config.disabled = !result.enabled;
+        peer.runtime.enabled = result.enabled; peer.runtime.error = peer.buildError;
+      }
     } catch (error) {
       if (error instanceof WindhawkError && error.code === 'CANCELED') { log.appendLine('Operation canceled.'); return; }
       entry.runtime.error = (error as Error).message; throw error;
     }
-    finally { entry.busy = undefined; entry.runtime.busy = false; entry.runtime.operation = undefined; publish(); }
+    finally { if (installedOperations.get(key) === entry) installedOperations.delete(key); entry.abort = undefined; entry.busy = undefined; entry.runtime.busy = false; entry.runtime.operation = undefined; publish(); }
   };
   const compare = async (state: ProjectState, entry: EntryState) => {
     const result = await generateEntry(state.project, entry.path, nodeFiles);
@@ -655,6 +721,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return true;
   };
   const applyEditor = async (state: ProjectState, settings: EditorSettings, reviewOnly = false) => {
+    if (disposed || state.removed) throw new Error('This project was closed.');
     const windhawk = await inspectWindhawk(settings.installationPath);
     const files = await editorConfiguration(state.project, settings, windhawk.compileFlags);
     for (const file of files.keys()) if (vscode.workspace.textDocuments.some(document => sameFile(document.uri.fsPath, path.join(state.project.root, file)) && document.isDirty)) throw new Error(`Save or revert ${file} before applying editor configuration.`);
@@ -670,6 +737,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return false;
     }
     for (const [file, bytes] of files) {
+      if (disposed || state.removed) throw new Error('This project was closed.');
       if (vscode.workspace.textDocuments.some(document => sameFile(document.uri.fsPath, path.join(state.project.root, file)) && document.isDirty)) throw new Error(`Editor settings became dirty: ${file}`);
       let now: Buffer | undefined; try { now = await fs.readFile(path.join(state.project.root, file)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       const before = previous.get(file);
@@ -677,6 +745,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!now?.equals(bytes)) await writeOutput(state.project, path.join(state.project.root, file), bytes);
     }
     // Editor preferences and toolchain paths are local; formatting and recommendations are shared.
+    if (disposed || state.removed) throw new Error('This project was closed.');
     await appendIgnoreRules(state.project, ['/.vscode/settings.json', '/.vscode/c_cpp_properties.json', '/.clangd']);
     state.editor = await resolveEditor(state.project.root); state.windhawk = windhawk; await refreshRuntime(state);
     // Applying files does not change the independently saved local preferences.
@@ -727,25 +796,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const config = validateConfig(input);
     if (vscode.workspace.textDocuments.some(document => sameFile(document.uri.fsPath, path.join(state.project.root, 'windhawk-amalgamation.json')) && document.isDirty)) throw new Error('Save or revert the configuration editor before updating sidebar settings.');
     const update = state.queue.then(async () => {
+      if (disposed || state.removed) throw new Error('This project was closed.');
       // Validate filesystem containment before persisting new settings.
       const temporaryProject: Project = { root: state.project.root, config };
       await assertSafeDestination(state.project.root, config.sourceDirectory + '/.wham-probe');
       await assertSafeDestination(state.project.root, config.outputDirectory + '/.wham-probe');
       await discoverEntries(temporaryProject, nodeFiles);
+      if (disposed || state.removed) throw new Error('This project was closed.');
       await writeOutput(state.project, path.join(state.project.root, 'windhawk-amalgamation.json'), Buffer.from(JSON.stringify(config, null, 2) + '\n'));
       state.project = temporaryProject;
       // Directory changes need fresh entry ownership and dependency state.
       if (state.timer) clearTimeout(state.timer);
       state.pending.clear();
       for (const entry of state.entries.values()) { entry.result = undefined; entry.status = 'stale'; }
-      await refresh(state); await refreshDraft(state); publish();
+      await refresh(state); await refreshDraft(state); await refreshEditorConfiguration(state); publish();
     });
     state.queue = update.then(() => undefined, () => undefined);
     await update;
     if (state.project.config.generate === 'onSave') await enqueue(state);
   };
   const verify = async (state: ProjectState, entry: EntryState) => {
-    if (entry.busy) return;
+    if (entry.busy || disposed || state.removed) return;
     let executable: string | undefined, args: string[] = [];
     const file = outputPath(state.project, entry.path);
     if (!state.editor.installationPath) {
@@ -758,24 +829,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       args = (argumentsList as string[]).map(argument => argument.replaceAll('{file}', file));
       if (!(argumentsList as string[]).some(argument => argument.includes('{file}'))) args.push(file);
     }
-    log.show(true); log.appendLine('Verify ' + file);
+    if (disposed || state.removed) return;
+    log.appendLine('Verify ' + file);
     const abort = new AbortController(); entry.abort = abort; entry.busy = 'verify'; entry.stopping = false;
     if (entry.runtime) { entry.runtime.busy = true; entry.runtime.operation = 'verify'; entry.runtime.stopping = false; } publish();
     try {
       if (state.editor.installationPath) {
         const source = await fs.readFile(file, 'utf8');
-        await checkModBuild(state.editor.installationPath, source, abort.signal, text => log.append(text), state.windhawk?.version, true);
+        const result = await checkModBuild(state.editor.installationPath, source, abort.signal, text => log.append(text), state.windhawk?.version, true);
+        if (result?.warnings) log.show(true);
       } else {
         const result = await runWindhawkProcess(executable!, args, undefined, { signal: abort.signal, timeoutMs: 600000, onOutput: text => log.append(text), cwd: state.project.root });
         if (result.code !== 0) throw new Error('Syntax verification failed (exit ' + result.code + ').');
+        if (/\bwarning:/i.test(result.stderr + '\n' + result.stdout)) log.show(true);
       }
       log.appendLine('Syntax verification passed.');
       void vscode.window.showInformationMessage('Syntax verification passed.');
-    } catch (error) { if (error instanceof WindhawkError && error.code === 'CANCELED') log.appendLine('Verification stopped.'); else throw error; }
+    } catch (error) { if (error instanceof WindhawkError && error.code === 'CANCELED') log.appendLine('Verification stopped.'); else { log.show(true); throw error; } }
     finally { entry.abort = undefined; entry.busy = undefined; entry.stopping = false; if (entry.runtime) { entry.runtime.busy = false; entry.runtime.operation = undefined; entry.runtime.stopping = false; } publish(); }
   };
   const runModAction = async (state: ProjectState, entry: EntryState, action: string, line?: number) => {
-    if (!state.entries.has(entry.path)) throw new Error('This mod is no longer in the project.');
+    if (state.removed || !state.entries.has(entry.path)) throw new Error('This mod is no longer in the project.');
     switch (action) {
       case 'generate': if (await saveRelevant(state)) await enqueue(state, [entry.path]); break;
       case 'compare': await compare(state, entry); break;
@@ -847,6 +921,7 @@ ${sidebarStyles}</style></head><body>
             <label>Windhawk installation<input name="installationPath" placeholder="Folder containing windhawk.ini"></label>
             <div class="toolbar"><button type="button" data-action="browseComputerInstallation">Browse / detect</button></div>
             <label>Elevation method<select name="elevation"><option value="none">None</option><option value="sudo">Windows sudo</option><option value="gsudo">gsudo</option></select></label>
+            <p id="elevation-help" class="muted" hidden>May require more approval prompts than gsudo.</p>
             <details id="gsudo-path"><summary>Custom gsudo path (optional)</summary><label><input name="gsudoPath" aria-label="Custom gsudo path" placeholder="Find gsudo.exe on PATH"></label><button type="button" data-action="browseGsudo">Browse…</button></details>
             <label>Default C++ language service<select name="integration"><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
             <div class="toolbar"><button type="submit" class="primary">Save preferences</button></div><p id="computer-status" role="status"></p>
@@ -864,12 +939,9 @@ ${sidebarStyles}</style></head><body>
           </form>
           <form id="editor-config">
             <label>C++ language service<select name="integration"><option value="default">Use default</option><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
-            <button type="button" id="save-project-preferences">Save local preferences</button>
-            <h2>Formatting · shared with project</h2>
             <label>Indentation<select name="indentStyle"><option value="spaces">Spaces</option><option value="tabs">Tabs</option></select></label>
-            <label>Indent / tab width<input name="indentSize" type="number" min="1" max="16" value="4"></label>
-            <div class="toolbar"><button type="submit" class="primary">Apply editor settings</button><button type="submit" data-editor-review>Review changes…</button></div><p id="editor-status" role="status"></p>
-            <p class="muted">Apply writes editor configuration and .clang-format. Saving local preferences does not change project files.</p>
+            <label>Tab width<input name="indentSize" type="number" min="1" max="16" value="4" required></label>
+            <div class="toolbar"><button type="submit" class="primary" id="apply-editor" title="Apply editor settings. Writes editor configuration and .clang-format.">Apply</button><button type="submit" data-editor-review title="Review proposed editor changes without saving them.">Review…</button></div><p id="editor-status" role="status"></p>
           </form>
           <section id="git-settings" hidden>
             <p id="settings-git-status"></p><div class="toolbar"><button data-action="sourceControl">Source control</button><button data-action="refreshGit">Refresh Git</button></div>
@@ -908,13 +980,15 @@ ${sidebarStyles}</style></head><body>
           if (message.action === 'computerPreferences' || message.action === 'checkElevation') {
             const settings = message.settings;
             if (!settings || typeof settings.installationPath !== 'string' || typeof settings.gsudoPath !== 'string' || !['none', 'sudo', 'gsudo'].includes(settings.elevation) || !['cpp', 'clangd', 'both'].includes(settings.integration)) throw new Error('Invalid computer preferences.');
-            const root = settings.installationPath.trim();
+            const root = settings.installationPath.trim().replace(/^(['"])(.*)\1$/, '$2');
             if (root && !path.isAbsolute(root)) throw new Error('Choose an absolute Windhawk installation path.');
-            const preferences: InstallationPreferences = { elevation: settings.elevation, gsudoPath: settings.gsudoPath.trim(), reuseSession: settings.elevation === 'gsudo' };
-            await inspectElevation(preferences);
+            const preferences: InstallationPreferences = { elevation: settings.elevation, gsudoPath: settings.gsudoPath.trim().replace(/^(['"])(.*)\1$/, '$2') };
+            const availability = await inspectElevation(preferences);
+            if (message.action === 'checkElevation') { await view?.webview.postMessage({ type: 'elevationChecked', message: availability.notice }); return; }
             if ([...projects.values()].some(project => [...project.entries.values()].some(entry => entry.busy))) throw new Error('Wait for the current Windhawk operation before changing preferences.');
             if (root) await fs.access(path.join(root, 'windhawk.ini'));
-            await closeElevationSessions();
+            const previous = installationPreferences(localPreferences.computer.installationPath);
+            if (!sameFile(root, localPreferences.computer.installationPath) || previous.elevation !== preferences.elevation || previous.gsudoPath !== preferences.gsudoPath) await closeElevationSessions();
             if (root) localPreferences.computer.installations[path.resolve(root).toLowerCase()] = preferences;
             localPreferences.computer.installationPath = root;
             localPreferences.computer.integration = settings.integration;
@@ -943,12 +1017,22 @@ ${sidebarStyles}</style></head><body>
             await view?.webview.postMessage({ type: 'projectPreferencesSaved' }); return;
           }
           if (message.action === 'editor' || message.action === 'reviewEditor') {
-            const settings = { ...state.editor, indentStyle: message.settings?.indentStyle, indentSize: message.settings?.indentSize };
-            if (await applyEditor(state, settings, message.action === 'reviewEditor')) await view?.webview.postMessage({ type: 'editorSaved' });
+            const integration = message.settings?.integration ?? projectPreferences(state.project.root).integration ?? 'default';
+            if (!['default', 'cpp', 'clangd', 'both'].includes(integration)) throw new Error('Choose a valid C++ language service.');
+            const settings = { ...state.editor, integration: integration === 'default' ? localPreferences.computer.integration : integration,
+              indentStyle: message.settings?.indentStyle, indentSize: message.settings?.indentSize };
+            if (await applyEditor(state, settings, message.action === 'reviewEditor')) {
+              const previousKey = Object.keys(localPreferences.projects).find(key => sameFile(key, state.project.root));
+              if (previousKey) delete localPreferences.projects[previousKey];
+              localPreferences.projects[state.project.root] = integration === 'default' ? {} : { integration };
+              await context.globalState.update('localPreferences', localPreferences);
+              state.editor = await resolveEditor(state.project.root); await refreshEditorConfiguration(state); publish();
+              await view?.webview.postMessage({ type: 'editorSaved', root: state.project.root });
+            } else if (message.action === 'reviewEditor') await view?.webview.postMessage({ type: 'editorReviewed', root: state.project.root });
             return;
           }
           if (message.action === 'select') { await rememberProject(state.project.root); publish(); return; }
-          if (message.action === 'config') { await updateConfig(state, message.config); await view?.webview.postMessage({ type: 'saved' }); return; }
+          if (message.action === 'config') { await updateConfig(state, message.config); await view?.webview.postMessage({ type: 'saved', root: state.project.root }); return; }
           if (message.action === 'generateAll') { if (await saveRelevant(state)) await enqueue(state); return; }
           if (!entry) throw new Error('Select a valid mod entry.');
           switch (message.action) {
@@ -956,12 +1040,13 @@ ${sidebarStyles}</style></head><body>
             case 'compile': await compileMod(state, entry); break;
             case 'testCompile': await compileMod(state, entry, true); break;
             case 'stopCompile':
-              if (entry.abort && !entry.abort.signal.aborted) { entry.stopping = true; if (entry.runtime) entry.runtime.stopping = true; entry.abort.abort(); publish(); }
+              const owner = entry.abort ? entry : entry.runtime?.id ? installedOperations.get(installedModKey(state.editor.installationPath, entry.runtime.id)) : undefined;
+              if (owner?.abort && !owner.abort.signal.aborted) { owner.stopping = true; if (owner.runtime) owner.runtime.stopping = true; owner.abort.abort(); publish(); }
               break;
             case 'enable': if (typeof message.enabled === 'boolean') await enableMod(state, entry, message.enabled); break;
             default: await runModAction(state, entry, message.action, message.line);
           }
-        } catch (error) { log.appendLine(String(error)); await view?.webview.postMessage({ type: 'error', message: (error as Error).message }); }
+        } catch (error) { log.appendLine(String(error)); await view?.webview.postMessage({ type: 'error', action: message?.action, root: message?.root, message: (error as Error).message }); }
       }));
       publish();
     }
@@ -985,10 +1070,13 @@ ${sidebarStyles}</style></head><body>
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(event => {
       for (const folder of event.added) if (folder.uri.scheme === 'file') void fs.stat(path.join(folder.uri.fsPath, 'windhawk-amalgamation.json')).then(() => addProject(folder.uri.fsPath)).catch(error => log.appendLine(String(error)));
-      for (const folder of event.removed) { for (const entry of projects.get(folder.uri.fsPath)?.entries.values() ?? []) entry.abort?.abort(); projects.delete(folder.uri.fsPath); }
+      for (const folder of event.removed) {
+        const state = [...projects.values()].find(state => sameFile(state.project.root, folder.uri.fsPath));
+        if (state) retireProject(state);
+      }
       publish();
     }),
-    { dispose() { disposed = true; void closeElevationSessions(); sidebarDetails?.controller.dispose(); for (const state of projects.values()) { for (const entry of state.entries.values()) entry.abort?.abort(); if (state.timer) clearTimeout(state.timer); if (state.runtimeTimer) clearTimeout(state.runtimeTimer); } } }
+    { dispose() { disposed = true; void closeElevationSessions(); sidebarDetails?.controller.dispose(); for (const state of projects.values()) retireProject(state); } }
   );
   if (vscode.window.onDidChangeWindowState) context.subscriptions.push(vscode.window.onDidChangeWindowState(event => { if (event.focused) for (const state of projects.values()) scheduleRefresh(state, true); }));
   for (const folder of vscode.workspace.workspaceFolders ?? []) if (folder.uri.scheme === 'file') {

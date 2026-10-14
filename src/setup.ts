@@ -7,6 +7,7 @@ import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { isMap, parseAllDocuments } from 'yaml';
 import { assertSafeDestination, initializeProject, writeOutput } from './io';
 import { Project, RestoreResult } from './types';
+import { readWindhawkPaths } from './windhawk';
 
 const run = promisify(execFile);
 export interface EditorSettings {
@@ -33,9 +34,19 @@ export async function readEditorSettings(root: string, saved: EditorSettings = e
   const compiler = [cppCompiler, clangdCompiler].find(file => path.isAbsolute(file) && /[\\/]Compiler[\\/]bin[\\/]clang(?:\+\+|d)\.exe$/i.test(file));
   const result = { ...saved };
   if (compiler) result.installationPath = path.resolve(path.dirname(path.dirname(path.dirname(compiler))));
-  if (cpp && clangdCompiler) result.integration = settings['C_Cpp.intelliSenseEngine'] === 'disabled' ? 'clangd' : 'both';
+  else for (const executable of [cppCompiler, clangdCompiler]) {
+    if (!path.isAbsolute(executable) || !/[\\/]bin[\\/]clang(?:\+\+|d)\.exe$/i.test(executable)) continue;
+    const candidate = path.resolve(path.dirname(path.dirname(path.dirname(executable))));
+    try {
+      await fs.access(path.join(candidate, 'windhawk.ini'));
+      const { compilerRoot } = await readWindhawkPaths(candidate);
+      if (path.resolve(path.dirname(executable)).toLowerCase() === path.join(compilerRoot, 'bin').toLowerCase()) { result.installationPath = candidate; break; }
+    } catch { /* A copied toolchain path may no longer exist. */ }
+  }
+  const clangdEnabled = !!clangdCompiler && settings['clangd.enable'] !== false;
+  if (cpp && clangdEnabled) result.integration = settings['C_Cpp.intelliSenseEngine'] === 'disabled' ? 'clangd' : 'both';
   else if (cpp) result.integration = 'cpp';
-  else if (clangdCompiler) result.integration = 'clangd';
+  else if (clangdEnabled) result.integration = 'clangd';
   const cppSettings = settings['[cpp]'] && typeof settings['[cpp]'] === 'object' ? settings['[cpp]'] : {};
   const width = cppSettings['editor.tabSize'] ?? settings['editor.tabSize'];
   const insertSpaces = cppSettings['editor.insertSpaces'] ?? settings['editor.insertSpaces'];
@@ -134,7 +145,7 @@ export async function findWindhawk(): Promise<string[]> {
   ])];
   const matches: string[] = [];
   for (const candidate of candidates) {
-    try { await fs.stat(path.join(candidate, 'Compiler', 'bin', 'clang++.exe')); await fs.stat(path.join(candidate, 'Compiler', 'include', 'windhawk_api.h')); matches.push(candidate); }
+    try { const { compilerRoot } = await readWindhawkPaths(candidate); await fs.stat(path.join(compilerRoot, 'bin', 'clang++.exe')); await fs.stat(path.join(compilerRoot, 'include', 'windhawk_api.h')); matches.push(candidate); }
     catch { /* Installed service-only folders do not contain the developer toolchain. */ }
   }
   return matches;
@@ -181,7 +192,8 @@ export async function editorConfiguration(project: Project, input: EditorSetting
     result.set('.clang-format', Buffer.from(documents.map(document => document.toString()).join('---\n')));
   }
   if (input.installationPath) {
-    const install = path.resolve(input.installationPath), compiler = path.join(install, 'Compiler', 'bin', 'clang++.exe'), api = path.join(install, 'Compiler', 'include', 'windhawk_api.h');
+    const { compilerRoot } = await readWindhawkPaths(input.installationPath);
+    const compiler = path.join(compilerRoot, 'bin', 'clang++.exe'), api = path.join(compilerRoot, 'include', 'windhawk_api.h');
     for (const file of [compiler, api]) if (!(await fs.stat(file)).isFile()) throw new Error(`Missing Windhawk toolchain file: ${file}`);
     const forward = (file: string) => file.split(path.sep).join('/');
     const includeDirectories = project.config.includeDirectories.map(directory => '${workspaceFolder}/' + directory);
@@ -193,7 +205,7 @@ export async function editorConfiguration(project: Project, input: EditorSetting
       const windhawk = {
         name: 'Windhawk (WHAM)', compilerPath: forward(compiler), intelliSenseMode: 'windows-clang-x64', cppStandard: 'c++23', cStandard: 'c17',
         defines, forcedInclude: [forward(api)], compilerArgs: baselineFlags ? baselineFlags.map(flag => flag === 'windhawk_api.h' ? forward(api) : flag) : ['-target', 'x86_64-w64-mingw32'],
-        includePath: ['${workspaceFolder}/' + project.config.sourceDirectory + '/**', ...includeDirectories, forward(path.join(install, 'Compiler', 'include'))]
+        includePath: ['${workspaceFolder}/' + project.config.sourceDirectory + '/**', ...includeDirectories, forward(path.join(compilerRoot, 'include'))]
       };
       const index = configurations.findIndex((item: { name?: string }) => item.name === windhawk.name);
       if (index < 0) configurations.push(windhawk); else configurations[index] = { ...configurations[index], ...windhawk };
@@ -201,12 +213,12 @@ export async function editorConfiguration(project: Project, input: EditorSetting
       result.set('.vscode/c_cpp_properties.json', Buffer.from(properties));
     }
     if (input.integration !== 'cpp') {
-      const clangd = path.join(install, 'Compiler', 'bin', 'clangd.exe'); await fs.stat(clangd);
+      const clangd = path.join(compilerRoot, 'bin', 'clangd.exe'); await fs.stat(clangd);
       const argumentsList = existingSettings['clangd.arguments'] ?? [];
       if (!Array.isArray(argumentsList) || argumentsList.some(item => typeof item !== 'string')) throw new Error('clangd.arguments must be an array of strings.');
       settings = edit(settings, [[['clangd.path'], forward(clangd)], [['clangd.arguments'], [...argumentsList.filter((item: string) => !item.startsWith('--query-driver=')), '--query-driver=' + forward(compiler)]]]);
       const flags = [...(baselineFlags ? baselineFlags.map(flag => flag === 'windhawk_api.h' ? forward(api) : flag) : ['-xc++', '-std=c++23', '--target=x86_64-w64-mingw32', ...defines.map(define => '-D' + define), '-include', forward(api)]),
-        ...project.config.includeDirectories.map(directory => '-I' + forward(path.resolve(project.root, directory))), '-I' + forward(path.join(install, 'Compiler', 'include'))];
+        ...project.config.includeDirectories.map(directory => '-I' + forward(path.resolve(project.root, directory))), '-I' + forward(path.join(compilerRoot, 'include'))];
       // A separate managed fragment keeps an existing .clangd file untouched.
       const existing = await read('.clangd');
       const begin = '# WHAM editor configuration begin', end = '# WHAM editor configuration end';
@@ -225,6 +237,7 @@ export async function editorConfiguration(project: Project, input: EditorSetting
         (existingOutputConfig === '{}\n' ? '' : existingOutputConfig.trimEnd() + '\n---\n') + outputFragment + '\n'));
     }
     settings = edit(settings, [[['C_Cpp.intelliSenseEngine'], input.integration === 'clangd' ? 'disabled' : 'default']]);
+    settings = edit(settings, [[['clangd.enable'], input.integration !== 'cpp']]);
     const extensions = await read('.vscode/extensions.json'), recommendations = parse(extensions).recommendations ?? [];
     if (!Array.isArray(recommendations)) throw new Error('extensions.recommendations must be an array.');
     const needed = input.integration === 'cpp' ? ['ms-vscode.cpptools'] : input.integration === 'clangd' ? ['llvm-vs-code-extensions.vscode-clangd'] : ['ms-vscode.cpptools', 'llvm-vs-code-extensions.vscode-clangd'];

@@ -2,16 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { parseMetadata } from './metadata';
-import { runWindhawkProcess, WindhawkError } from './windhawk';
+import { readWindhawkPaths, runWindhawkProcess, WindhawkError } from './windhawk';
 
 /** Compile or syntax-check a snapshot in scratch storage; never install or load it. */
 export async function checkModBuild(root: string, source: string, signal: AbortSignal, onOutput: (text: string) => void, windhawkVersion?: string, syntaxOnly = false) {
   if (!root) throw new Error('Select your Windhawk installation in Settings → Extension settings to check a build.');
-  const iniBytes = await fs.readFile(path.join(root, 'windhawk.ini'));
-  const ini = iniBytes.subarray(0, 2).equals(Buffer.from([0xff, 0xfe])) ? iniBytes.subarray(2).toString('utf16le') : iniBytes.toString('utf8');
-  const storage = /\[Storage\]([\s\S]*?)(?:\r?\n\[|$)/i.exec(ini)?.[1] ?? '';
-  const compilerRoot = path.resolve(root, /^CompilerPath\s*=\s*(.+)$/im.exec(storage)?.[1].trim() ?? 'Compiler');
-  const engineRoot = path.resolve(root, /^EnginePath\s*=\s*(.+)$/im.exec(storage)?.[1].trim() ?? 'Engine');
+  const { compilerRoot, engineRoot } = await readWindhawkPaths(root);
   const metadata = parseMetadata(source, 'mod.wh.cpp').fields;
   const options: string[] = [];
   let argument = '', quote = '', active = false;
@@ -39,6 +35,7 @@ export async function checkModBuild(root: string, source: string, signal: AbortS
   const relativeTemporary = path.relative(os.tmpdir(), temporary);
   if (relativeTemporary.includes(path.sep) || !relativeTemporary.startsWith('wham-build-')) throw new Error('Invalid temporary build folder.');
   try {
+    let warnings = false;
     const escapeDefine = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const version = /^(\d+)\.(\d+)\.(\d+)/.exec(windhawkVersion ?? '');
     const versionHex = version ? '0x' + version.slice(1).map(value => Number(value).toString(16).padStart(2, '0')).join('') + '00' : '0x00000000';
@@ -56,8 +53,10 @@ export async function checkModBuild(root: string, source: string, signal: AbortS
       onOutput((syntaxOnly ? 'Verify syntax ' : 'Test build ') + target.triple + '\n');
       const result = await runWindhawkProcess(path.join(compilerRoot, 'bin', 'clang++.exe'), args, source, { signal, timeoutMs: 600000, onOutput, cwd: temporary });
       if (result.code !== 0) throw new WindhawkError(syntaxOnly ? 'Syntax verification failed.' : 'Test build failed.', 'COMPILER_FAILED', { output: result.stderr + result.stdout }, result.stderr);
+      warnings ||= /\bwarning:/i.test(result.stderr + '\n' + result.stdout);
       if (!syntaxOnly && !(await fs.stat(output).catch(() => undefined))?.isFile()) throw new Error('Compiler produced no test DLL.');
     }
+    return { warnings };
   } finally {
     await fs.rm(temporary, { recursive: true, force: true });
   }

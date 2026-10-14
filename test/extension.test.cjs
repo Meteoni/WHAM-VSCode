@@ -21,8 +21,9 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
   await fs.mkdir(path.join(root, 'installation')); await fs.writeFile(path.join(root, 'installation/windhawk.ini'), '[Storage]\nPortable=1\n');
   await fs.mkdir(path.join(root,'installation/Compiler/bin'),{recursive:true});await fs.mkdir(path.join(root,'installation/Compiler/include'),{recursive:true});
   for(const file of ['bin/clang++.exe','bin/clangd.exe','include/windhawk_api.h'])await fs.writeFile(path.join(root,'installation/Compiler',file),'fixture');
-  let receive, provider, onSave, onChange;
-  let noInstallations=false, singleVerifies=0;
+  let receive, provider, onSave, onChange, onFolders;
+  let noInstallations=false, singleVerifies=0,elevationCloses=0;
+  let holdGenerationFor, releaseGeneration;
   const commands = new Map(), watchers = [], messages = [], documents = [], stored = {}, globalStored = {}, generations = new Map();
   const disposable = () => ({ dispose() {} });
   const Uri = {
@@ -38,13 +39,13 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       workspaceFolders: [{ uri: Uri.file(root) }], textDocuments: documents,
       getConfiguration: () => ({ get: () => undefined }),
       registerTextDocumentContentProvider: disposable,
-      createFileSystemWatcher() {
-        const watcher = { ...disposable(), onDidChange(fn) { this.change = fn; return disposable(); }, onDidCreate(fn) { this.create = fn; return disposable(); }, onDidDelete(fn) { this.delete = fn; return disposable(); } };
+      createFileSystemWatcher(pattern) {
+        const watcher = { root: pattern.root, dispose() { this.disposed = true; }, onDidChange(fn) { this.change = fn; return disposable(); }, onDidCreate(fn) { this.create = fn; return disposable(); }, onDidDelete(fn) { this.delete = fn; return disposable(); } };
         watchers.push(watcher); return watcher;
       },
       onDidSaveTextDocument(fn) { onSave = fn; return disposable(); },
       onDidChangeTextDocument(fn) { onChange = fn; return disposable(); },
-      onDidChangeWorkspaceFolders: disposable
+      onDidChangeWorkspaceFolders(fn) { onFolders = fn; return disposable(); }
     },
     window: {
       createOutputChannel: () => ({ ...disposable(), appendLine() {}, append() {}, show() {} }),
@@ -61,11 +62,17 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
   const load = Module._load;
   Module._load = function(name, ...args) {
     if(name==='vscode')return mock;
+    if(name==='./windhawk' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')){const windhawk=load.call(this,name,...args);return {...windhawk,inspectElevation:async()=>({notice:'fixture ready'}),closeElevationSessions:async()=>{elevationCloses++;}};}
     if(name==='./compiler' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js'))return {checkModBuild:async(root,source,signal,onOutput,version,syntaxOnly)=>{assert.equal(syntaxOnly,true);singleVerifies++;}};
     if(name==='./setup' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')){const setup=load.call(this,name,...args);return {...setup,findWindhawk:async()=>noInstallations?[]:setup.findWindhawk()};}
     if(name==='./engine' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')) {
       const engine=load.call(this,name,...args);
-      return {...engine,generateEntry:(project,entry,...rest)=>{generations.set(entry,(generations.get(entry)||0)+1);return engine.generateEntry(project,entry,...rest);}};
+      return {...engine,generateEntry:async(project,entry,...rest)=>{
+        generations.set(entry,(generations.get(entry)||0)+1);
+        const result = await engine.generateEntry(project,entry,...rest);
+        if (entry === holdGenerationFor) await new Promise(resolve => { releaseGeneration = resolve; });
+        return result;
+      }};
     }
     return load.call(this,name,...args);
   };
@@ -83,9 +90,19 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     await settle(() => project()?.entries.every(entry => entry.status === 'current'));
     assert.equal(commands.size, 10); assert.equal(project().entries.length, 2);
     assert.equal(project().editor.installationPath, path.join(root, 'installation')); assert.equal(project().editor.indentSize, 2); assert.equal(project().editor.indentStyle, 'tabs');
+    await settle(()=>project().editorNeedsApply===true);
     // Local preference saves never write generation, formatting, or editor files.
     const filesBeforePreferences = await Promise.all(['windhawk-amalgamation.json', '.vscode/settings.json', '.vscode/c_cpp_properties.json'].map(file => fs.readFile(path.join(root, file))));
     await receive({ action: 'computerPreferences', settings: { installationPath: path.join(root, 'installation'), elevation: 'none', gsudoPath: '', integration: 'clangd' } });
+    const savedComputer=structuredClone(globalStored.localPreferences.computer),closesBeforeCheck=elevationCloses;
+    await receive({action:'checkElevation',settings:{installationPath:path.join(root,'installation'),elevation:'gsudo',gsudoPath:'fixture-gsudo',integration:'cpp'}});
+    assert.deepEqual(globalStored.localPreferences.computer,savedComputer);assert.equal(elevationCloses,closesBeforeCheck);
+    const elevationSettings={installationPath:path.join(root,'installation'),elevation:'gsudo',gsudoPath:'fixture-gsudo',integration:'clangd'};
+    await receive({action:'computerPreferences',settings:elevationSettings});assert.equal(elevationCloses,closesBeforeCheck+1);
+    await receive({action:'computerPreferences',settings:elevationSettings});assert.equal(elevationCloses,closesBeforeCheck+1,'Unchanged preferences retain approval');
+    await receive({action:'computerPreferences',settings:{...elevationSettings,integration:'cpp'}});assert.equal(elevationCloses,closesBeforeCheck+1,'Language service changes retain approval');
+    await receive({action:'computerPreferences',settings:{...elevationSettings,installationPath:'"'+path.join(root,'installation')+'"',gsudoPath:'"another-gsudo"'}});assert.equal(elevationCloses,closesBeforeCheck+2);assert.equal(globalStored.localPreferences.computer.installationPath,path.join(root,'installation'));assert.equal(globalStored.localPreferences.computer.installations[path.join(root,'installation').toLowerCase()].gsudoPath,'another-gsudo');
+    await receive({action:'computerPreferences',settings:{...elevationSettings,elevation:'none',gsudoPath:''}});
     await receive({ action: 'projectPreferences', root, settings: { integration: 'default' } });
     assert.equal(project().editor.installationPath, path.join(root, 'installation')); assert.equal(project().editor.integration, 'clangd');
     assert.deepEqual(globalStored.localPreferences.projects[root], {});
@@ -212,12 +229,21 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     const settings={...require('../dist/setup').editorDefaults,...globalStored.localPreferences.projects[newRoot],indentSize:4};
     mock.window.showQuickPick=async()=>{throw new Error('Apply must not ask for a second confirmation');};
     await receive({action:'editor',root:newRoot,settings});assert.equal(JSON.parse(await fs.readFile(path.join(newRoot,'.vscode/settings.json'),'utf8'))['[cpp]']['editor.tabSize'],4);
+    assert.equal(globalStored.localPreferences.projects[newRoot].integration,'cpp','Apply also saves the selected language service locally');
+    const editorProject=()=>messages.filter(message=>message.type==='state').at(-1).projects.find(project=>project.root===newRoot);
+    assert.equal(editorProject().editorNeedsApply,false,'A complete applied configuration has no pending work');
+    await fs.unlink(path.join(newRoot,'.vscode/c_cpp_properties.json'));
+    watchers.find(watcher=>watcher.root===newRoot).delete(Uri.file(path.join(newRoot,'.vscode/c_cpp_properties.json')));
+    await settle(()=>editorProject().editorNeedsApply===true);
+    await receive({action:'editor',root:newRoot,settings});
+    assert.equal(editorProject().editorNeedsApply,false,'Apply restores missing configuration without requiring a field edit');
     const beforeReview=await fs.readFile(path.join(newRoot,'.vscode/settings.json'));
     let reviewDiffs=0;const executeBeforeReview=mock.commands.executeCommand;
     mock.commands.executeCommand=async(command,...args)=>{if(command==='vscode.diff')reviewDiffs++;else await executeBeforeReview(command,...args);};
     mock.window.showQuickPick=async(choices,options)=>{assert.equal(options.title,'Review editor changes');assert.ok(!choices.includes('Apply reviewed editor settings'));return choices[0];};
     const savedBeforeReview=messages.filter(message=>message.type==='editorSaved').length;
-    await receive({action:'reviewEditor',root:newRoot,settings:{...settings,indentSize:3}});
+    await receive({action:'reviewEditor',root:newRoot,settings:{...settings,integration:'clangd',indentSize:3}});
+    assert.equal(globalStored.localPreferences.projects[newRoot].integration,'cpp','Review does not save the proposed language service');
     assert.equal(reviewDiffs,1);assert.equal(globalStored.localPreferences.projects[newRoot].indentSize,undefined);assert.deepEqual(await fs.readFile(path.join(newRoot,'.vscode/settings.json')),beforeReview);assert.equal(messages.filter(message=>message.type==='editorSaved').length,savedBeforeReview);
     documents.push({uri:Uri.file(path.join(newRoot,'.vscode/settings.json')),isDirty:true});
     await receive({action:'editor',root:newRoot,settings:{...settings,indentSize:3}});documents.length=0;
@@ -345,6 +371,36 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     await assert.rejects(fs.stat(path.join(plainRoot, '.vscode/settings.json')), /ENOENT/);
     assert.equal(opened.at(-1)[1].fsPath, plainRoot);
     assert.equal(globalStored.recentProjects[0], plainRoot);
+    // Retiring a project must cancel both debounces and queued work. Reopening
+    // creates a new watcher and resumes generation without resurrecting old work.
+    provider.resolveWebviewView({ webview: { cspSource: 'test-resource:', asWebviewUri: uri => uri.toString(), postMessage: async message => { messages.push(message); }, onDidReceiveMessage(fn) { receive = fn; return disposable(); } } });
+    const closingRoot = plainRoot, closingEntry = path.join(closingRoot, 'src/closing.cpp');
+    await fs.writeFile(closingEntry, 'int closing = 1;\n');
+    const closingWatcher = watchers.findLast(watcher => watcher.root === closingRoot);
+    closingWatcher.create(Uri.file(closingEntry));
+    const closingProject = () => messages.filter(message => message.type === 'state').at(-1)?.projects.find(project => project.root === closingRoot);
+    await settle(() => closingProject()?.entries[0]?.status === 'current');
+    await receive({ action: 'config', root: closingRoot, config: { ...closingProject().config, debounceMs: 250 } });
+    const closingOutput = path.join(closingRoot, 'output/closing.wh.cpp');
+    const previousOutput = await fs.readFile(closingOutput), beforeClose = generations.get(closingEntry);
+    await fs.writeFile(closingEntry, 'int closing = 2;\n'); onSave({ uri: Uri.file(closingEntry) });
+    onFolders({ added: [], removed: [{ uri: Uri.file(closingRoot) }] });
+    assert.equal(closingWatcher.disposed, true);
+    await new Promise(resolve => setTimeout(resolve, 700));
+    assert.deepEqual(await fs.readFile(closingOutput), previousOutput);
+    assert.equal(generations.get(closingEntry), beforeClose);
+    onFolders({ added: [{ uri: Uri.file(closingRoot) }], removed: [] });
+    await settle(() => closingProject()?.entries[0]?.status === 'current');
+    assert.notEqual(watchers.findLast(watcher => watcher.root === closingRoot), closingWatcher);
+    assert.match(await fs.readFile(closingOutput, 'utf8'), /int closing = 2;/);
+    const reopenedOutput = await fs.readFile(closingOutput);
+    holdGenerationFor = closingEntry; releaseGeneration = undefined;
+    await fs.writeFile(closingEntry, 'int closing = 3;\n'); onSave({ uri: Uri.file(closingEntry) });
+    await settle(() => releaseGeneration);
+    onFolders({ added: [], removed: [{ uri: Uri.file(closingRoot) }] });
+    holdGenerationFor = undefined; releaseGeneration();
+    await new Promise(resolve => setTimeout(resolve, 700));
+    assert.deepEqual(await fs.readFile(closingOutput), reopenedOutput, 'An in-flight generation cannot commit after project removal');
     // With no recent history, opening goes straight to a folder picker.
     for (const subscription of context.subscriptions.splice(0)) subscription.dispose();
     globalStored.recentProjects = []; delete stored.additionalRoots;

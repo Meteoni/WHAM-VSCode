@@ -1,3 +1,25 @@
+## 1.5.11 — 2026-10-14
+
+- All 48 regression tests passed. New cases cover shared installed-mod IDs across projects, blocked competing writes, stopping from a peer card, synchronized Enabled state, cancelled project debounces, in-flight generation after folder removal, fresh watchers on reopening, all C++ service transitions, and custom relative/absolute UTF-16 CompilerPath layouts.
+- Native x64 checks passed parser parity, Unicode argv, cancellation and child cleanup, deadlines, scratch DLL linking, syntax-only x86/x64/ARM64, and rejection of unresolved link symbols. No installed mod was changed.
+- Browser checks passed the existing sidebar workflows across five themes and narrow widths. Actual Windhawk Clang and clangd validated the demo sources, generated outputs, exact recovery and generated editor configuration.
+- Real standard-install writes, UAC reuse and ARM64 execution were not exercised by this change.
+
+## 1.5.10 — 2026-10-14
+
+- All 46 regression tests passed. Discovery fixtures cover empty/stale PATH, quoted PATH entries, user/global Scoop roots and overrides, explicit quoted paths, and invalid quotes. Native read-only probes found the actual Scoop gsudo with PATH empty and verified both quote styles without requesting approval.
+- Browser checks passed quoted preference submission and existing workflows across five themes, including narrow widths. Quoting an unchanged installation folder preserves the pending elevation selection. Git page content and layout remain unchanged.
+- Temporary elevation traces were removed; cache reuse, readiness, concurrency and cancellation checks remain covered.
+- Output reveal coverage checks clean Test build and Verify, warnings and failures, Stop, explicit Show log, and the custom-compiler path. Compile keeps its existing warning/error policy. Generated-file tabs and diffs are opened only by explicit actions.
+- Windows sudo shows its conditional approval note beneath the selector; None and gsudo hide it.
+- Browser checks confirm unchanged Compile width/height while building and stopping, hidden busy text, a centered spinner, and a spinner-free Stopping label.
+
+## 1.5.9 — 2026-10-14
+
+- All 45 regression tests passed. Elevation coverage checks reuse, concurrent cache reopening, external cache ownership, disabled caching, failed readiness, cancellation, and preference saves that should retain approval.
+- gsudo 2.6.1 passed the synthetic native Unicode/stream/cancellation test. A real isolated VS Code extension host reused one process-scoped cache for three successive workers and a read-only Windhawk CLI call; explicit close removed that cache. No mod was installed, compiled, enabled, or disabled by these diagnostics.
+- Repeated prompts during the user's actual Compile were not reproduced. The Compile log now records the selected method, executable, extension-host/caller PIDs, and cache availability so the next occurrence can be traced.
+
 ## 1.5.3 — 2026-10-14
 
 - All 41 regression tests passed. Expanded workflow coverage checks direct editor Apply, non-writing optional Review, dirty-editor protection, direct comparison of two recovery copies, single-mod commands, and no-installation folder browsing. Recovery uses one final replacement action and rejects destination changes made during confirmation.

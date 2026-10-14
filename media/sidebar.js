@@ -5,7 +5,7 @@ const form = document.getElementById('config');
 const editorForm = document.getElementById('editor-config');
 const computerForm = document.getElementById('computer-config');
 const previousView = vscode.getState();
-let state = { projects: [], projectChoices: [] }, currentRoot, configurationDirty = false, editorDirty = false, localDirty = false, computerDirty = false, computerInstallation;
+let state = { projects: [], projectChoices: [] }, currentRoot, configurationDirty = false, configurationSaving = false, editorDirty = false, editorApplying = false, editorReviewing = false, editorFailed = false, computerDirty = false, computerSaving = false;
 let pageName = previousView?.page, settingsScope = previousView?.settingsScope || (previousView?.settings === 'extension' ? 'extension' : 'project');
 let settingsPage = ['editor', 'generation', 'git'].includes(previousView?.settings) ? previousView.settings : 'editor', selectedEntry = previousView?.entry;
 let settingUp = false, setupRoot;
@@ -29,46 +29,69 @@ projectSelect.addEventListener('change', () => {
   // Keep the active selection if browsing is cancelled or opening fails.
   projectSelect.value = currentRoot || '';
 });
-editorForm.addEventListener('input', event => {
-  if (event.target.name === 'integration') localDirty = true;
-  else editorDirty = true;
-  document.getElementById('editor-status').textContent = localDirty ? 'Unsaved local preferences' : 'Unapplied editor settings';
-  for (const button of editorForm.querySelectorAll('[type="submit"]')) button.disabled = localDirty;
+function updateEditorActions() {
+  const project = state.projects.find(project => project.root === currentRoot);
+  editorDirty = !!project && (editorForm.elements.namedItem('integration').value !== (project.local?.integration ?? 'default') ||
+    editorForm.elements.namedItem('indentStyle').value !== project.editor.indentStyle || Number(editorForm.elements.namedItem('indentSize').value) !== project.editor.indentSize);
+  const pending = !!project && (editorDirty || project.editorNeedsApply !== false || editorFailed);
+  const apply = document.getElementById('apply-editor');
+  apply.title = pending ? 'Apply pending editor changes. Writes editor configuration and .clang-format.' : 'Editor settings already match.';
+  apply.setAttribute('aria-busy', String(editorApplying));
+  for (const button of editorForm.querySelectorAll('[type="submit"]')) button.disabled = !pending || editorApplying || editorReviewing || !editorForm.elements.namedItem('indentSize').validity.valid;
+}
+editorForm.addEventListener('input', () => {
+  document.getElementById('editor-status').textContent = ''; document.getElementById('editor-status').classList.remove('danger');
+  editorFailed = false;
+  updateEditorActions();
 });
 editorForm.addEventListener('submit', event => {
   event.preventDefault();
   const settings = {};
-  const project = state.projects.find(project => project.root === currentRoot);
-  settings.installationPath = project.editor.installationPath; settings.integration = project.editor.integration;
+  settings.integration = editorForm.elements.namedItem('integration').value;
   settings.indentStyle = editorForm.elements.namedItem('indentStyle').value;
   settings.indentSize = Number(editorForm.elements.namedItem('indentSize').value);
+  if (event.submitter?.hasAttribute('data-editor-review')) editorReviewing = true;
+  else editorApplying = true;
+  updateEditorActions();
   send(event.submitter?.hasAttribute('data-editor-review') ? 'reviewEditor' : 'editor', { settings });
 });
-document.getElementById('save-project-preferences').addEventListener('click', () => send('projectPreferences', { settings: {
-  integration: editorForm.elements.namedItem('integration').value
-} }));
-const readComputerForm = () => ({ installationPath: computerForm.elements.namedItem('installationPath').value.trim(),
-  elevation: computerForm.elements.namedItem('elevation').value, gsudoPath: computerForm.elements.namedItem('gsudoPath').value.trim(),
+const readComputerForm = () => ({ installationPath: computerForm.elements.namedItem('installationPath').value.trim().replace(/^(['"])(.*)\1$/, '$2'),
+  elevation: computerForm.elements.namedItem('elevation').value, gsudoPath: computerForm.elements.namedItem('gsudoPath').value.trim().replace(/^(['"])(.*)\1$/, '$2'),
   integration: computerForm.elements.namedItem('integration').value });
-function fillInstallationPreferences() {
-  const installation = computerForm.elements.namedItem('installationPath').value.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
+function fillInstallationPreferences(reset = false) {
+  const installation = readComputerForm().installationPath.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
+  if (!reset && computerForm.dataset.installation === installation) return;
+  computerForm.dataset.installation = installation;
   const computer = state.computer || { installationPath: '', installations: {} };
   const key = Object.keys(computer.installations).find(key => key.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() === installation);
   const preference = computer.installations[key] || { elevation: 'none', gsudoPath: '' };
   computerForm.elements.namedItem('elevation').value = preference.elevation; computerForm.elements.namedItem('gsudoPath').value = preference.gsudoPath;
 }
-computerForm.addEventListener('input', event => { computerDirty = true; document.getElementById('computer-status').textContent = 'Unsaved computer preferences'; if (event.target.name === 'elevation') render(); });
+computerForm.addEventListener('input', event => { updateSaveActions(); document.getElementById('computer-status').textContent = ''; document.getElementById('computer-status').classList.remove('danger'); if (event.target.name === 'elevation') render(); });
 computerForm.elements.namedItem('installationPath').addEventListener('change', () => { fillInstallationPreferences(); render(); });
-computerForm.addEventListener('submit', event => { event.preventDefault(); send('computerPreferences', { settings: readComputerForm() }); });
-form.addEventListener('input', () => { configurationDirty = true; document.getElementById('settings-status').textContent = 'Unsaved settings'; });
-form.addEventListener('submit', event => {
-  event.preventDefault();
+computerForm.addEventListener('submit', event => { event.preventDefault(); computerSaving = true; updateSaveActions(); send('computerPreferences', { settings: readComputerForm() }); });
+function readGenerationForm() {
   const config = { formatVersion: 1 };
   for (const name of ['sourceDirectory', 'outputDirectory', 'generate']) config[name] = form.elements.namedItem(name).value.trim();
   for (const name of ['entries', 'exclude', 'includeDirectories', 'externalIncludes']) config[name] = form.elements.namedItem(name).value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   config.debounceMs = Number(form.elements.namedItem('debounceMs').value);
   config.inlineAngleIncludes = form.elements.namedItem('inlineAngleIncludes').checked;
-  send('config', { config });
+  return config;
+}
+function updateSaveActions() {
+  const project = state.projects.find(project => project.root === currentRoot);
+  configurationDirty = !!project && Object.entries(readGenerationForm()).some(([key, value]) => JSON.stringify(value) !== JSON.stringify(project.config[key]));
+  form.querySelector('[type="submit"]').disabled = !project || configurationSaving || !(configurationDirty || project.error) || ![...form.elements].every(input => !input.validity || input.validity.valid);
+  const computer = state.computer || { installationPath: '', integration: 'cpp', installations: {} };
+  const selectedPath = computer.installationPath.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
+  const key = Object.keys(computer.installations).find(key => key.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() === selectedPath);
+  const preference = computer.installations[key] || { elevation: 'none', gsudoPath: '' }, settings = readComputerForm();
+  computerDirty = settings.installationPath.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() !== selectedPath || settings.integration !== computer.integration || settings.elevation !== preference.elevation || settings.gsudoPath !== (preference.gsudoPath ?? '');
+  computerForm.querySelector('[type="submit"]').disabled = !computerDirty || computerSaving;
+}
+form.addEventListener('input', () => { updateSaveActions(); document.getElementById('settings-status').textContent = ''; document.getElementById('settings-status').classList.remove('danger'); });
+form.addEventListener('submit', event => {
+  event.preventDefault(); configurationSaving = true; updateSaveActions(); send('config', { config: readGenerationForm() });
 });
 for (const [id, section] of [['edit-metadata', 'metadata'], ['edit-readme', 'readme'], ['edit-mod-settings', 'settings']]) {
   document.getElementById(id).addEventListener('click', () => {
@@ -104,11 +127,12 @@ function render() {
   form.hidden = settingsScope !== 'project' || settingsPage !== 'generation'; editorForm.hidden = settingsScope !== 'project' || settingsPage !== 'editor' || !project;
   computerForm.hidden = settingsScope !== 'extension';
   if (!computerDirty) {
-    computerForm.elements.namedItem('installationPath').value = computerInstallation ?? state.computer?.installationPath ?? '';
+    computerForm.elements.namedItem('installationPath').value = state.computer?.installationPath ?? '';
     computerForm.elements.namedItem('integration').value = state.computer?.integration ?? 'cpp';
-    fillInstallationPreferences();
+    fillInstallationPreferences(true);
   }
   const method = computerForm.elements.namedItem('elevation').value;
+  document.getElementById('elevation-help').hidden = method !== 'sudo';
   document.getElementById('gsudo-path').hidden = method !== 'gsudo';
   document.getElementById('git-settings').hidden = settingsScope !== 'project' || settingsPage !== 'git';
   vscode.setState({ page: pageName, settingsScope, settings: settingsPage, entry: selectedEntry });
@@ -162,13 +186,17 @@ function render() {
     const filename = document.createElement('p'); filename.className = 'muted'; filename.textContent = entry.label + (fields.version?.[0] ? ` · v${fields.version[0]}` : ''); card.append(filename);
     const sourceInfo = document.createElement('div'); sourceInfo.className = 'entry-source-info';
     const sourceCount = document.createElement('p'); sourceCount.textContent = `${entry.dependencies || 0} source file(s)`; sourceInfo.append(sourceCount);
-    const compile = document.createElement('button'); compile.className = 'primary'; compile.textContent = 'Compile'; compile.disabled = !!entry.runtime?.busy;
+    const compile = document.createElement('button'); compile.className = 'primary'; compile.disabled = !!entry.runtime?.busy;
+    const caption = document.createElement('span'); caption.className = 'compile-caption'; caption.textContent = 'Compile'; compile.append(caption);
+    compile.title = 'Generate, compile, and install saved source. Preserve Enabled; the first build starts disabled.';
     const building = ['compile', 'test', 'verify'].includes(entry.runtime?.operation);
     if (building) {
-      const spinner = document.createElement('span'); spinner.className = 'compile-spinner'; spinner.setAttribute('aria-hidden', 'true');
-      compile.replaceChildren(spinner, document.createTextNode(entry.runtime?.stopping ? 'Stopping…' : entry.runtime?.operation === 'test' ? 'Test build' : entry.runtime?.operation === 'verify' ? 'Verify' : 'Compile')); compile.setAttribute('aria-busy', 'true');
+      const progress = document.createElement('span'); progress.className = entry.runtime?.stopping ? 'compile-stopping' : 'compile-spinner'; progress.setAttribute('aria-hidden', 'true');
+      if (entry.runtime?.stopping) progress.textContent = 'Stopping';
+      compile.append(progress); compile.setAttribute('aria-busy', 'true');
+      const label = entry.runtime?.stopping ? 'Stopping…' : entry.runtime?.operation === 'test' ? 'Testing build…' : entry.runtime?.operation === 'verify' ? 'Verifying…' : 'Compiling…';
+      compile.setAttribute('aria-label', label); compile.title = label;
     }
-    compile.title = 'Generate, compile, and install saved source. Preserve Enabled; the first build starts disabled.';
     compile.addEventListener('click', () => send('compile', { entry: entry.path }));
     const split = document.createElement('div'); split.className = 'compile-split'; split.append(compile);
     const menu = document.createElement('details'); menu.className = 'more-menu compile-menu';
@@ -264,10 +292,11 @@ function render() {
     if (['installationPath', 'integration'].includes(key)) continue;
     const input = editorForm.elements.namedItem(key); if (input) input.value = value;
   }
-  if (project?.editor && !localDirty) {
+  if (project?.editor && !editorDirty) {
     editorForm.elements.namedItem('integration').value = project.local?.integration ?? 'default';
   }
-  for (const button of editorForm.querySelectorAll('[type="submit"]')) button.disabled = localDirty;
+  updateEditorActions();
+  updateSaveActions();
 }
 window.addEventListener('message', event => {
   if (event.data.type === 'state') {
@@ -275,7 +304,7 @@ window.addEventListener('message', event => {
     const previousRoot = currentRoot;
     state = event.data; currentRoot = state.selected;
     if (previousRoot !== currentRoot) {
-      configurationDirty = false; editorDirty = false; localDirty = false; selectedEntry = undefined;
+      configurationDirty = false; configurationSaving = false; editorDirty = false; editorApplying = false; editorReviewing = false; editorFailed = false; selectedEntry = undefined;
       document.getElementById('settings-status').textContent = ''; document.getElementById('editor-status').textContent = '';
     }
     if (firstState) pageName = previousView?.page || (currentRoot ? 'project' : 'setup');
@@ -288,17 +317,27 @@ window.addEventListener('message', event => {
     render();
   }
   if (event.data.type === 'detailsFallback') { selectedEntry = event.data.entry; pageName = 'mod'; render(); }
-  if (event.data.type === 'error') { document.getElementById('error').textContent = event.data.message; document.getElementById('setup-status').textContent = ''; settingUp = false; }
+  if (event.data.type === 'error') {
+    if (['editor', 'reviewEditor'].includes(event.data.action) && event.data.root === currentRoot) {
+      editorApplying = false; editorReviewing = false; editorFailed = true; document.getElementById('editor-status').textContent = event.data.message; document.getElementById('editor-status').classList.add('danger'); updateEditorActions();
+    } else if (event.data.action === 'config' && event.data.root === currentRoot) {
+      configurationSaving = false; document.getElementById('settings-status').textContent = event.data.message; document.getElementById('settings-status').classList.add('danger'); updateSaveActions();
+    } else if (event.data.action === 'computerPreferences') {
+      computerSaving = false; document.getElementById('computer-status').textContent = event.data.message; document.getElementById('computer-status').classList.add('danger'); updateSaveActions();
+    } else document.getElementById('error').textContent = event.data.message;
+    document.getElementById('setup-status').textContent = ''; settingUp = false;
+  }
   if (event.data.type === 'setupFinished') {
     settingUp = false; document.getElementById('setup-status').textContent = '';
     if (event.data.completed && currentRoot) { pageName = 'project'; configurationDirty = false; editorDirty = false; render(); }
   }
-  if (event.data.type === 'saved') { configurationDirty = false; document.getElementById('settings-status').textContent = 'Configuration saved'; render(); }
-  if (event.data.type === 'editorSaved') { editorDirty = false; document.getElementById('editor-status').textContent = 'Editor settings applied'; render(); }
-  if (event.data.type === 'projectPreferencesSaved') { localDirty = false; document.getElementById('editor-status').textContent = 'Local preferences saved. Project files unchanged.'; render(); }
-  if (event.data.type === 'computerSaved') { computerInstallation = computerForm.elements.namedItem('installationPath').value; computerDirty = false; document.getElementById('computer-status').textContent = 'Preferences saved.'; render(); }
-  if (event.data.type === 'computerInstallation') { computerForm.elements.namedItem('installationPath').value = event.data.value; computerInstallation = event.data.value; fillInstallationPreferences(); computerDirty = true; render(); }
-  if (event.data.type === 'gsudoPath') { computerForm.elements.namedItem('gsudoPath').value = event.data.value; document.getElementById('gsudo-path').open = true; computerDirty = true; }
+  if (event.data.type === 'saved' && (!event.data.root || event.data.root === currentRoot)) { configurationSaving = false; updateSaveActions(); document.getElementById('settings-status').textContent = 'Configuration saved'; document.getElementById('settings-status').classList.remove('danger'); render(); }
+  if (event.data.type === 'editorSaved' && (!event.data.root || event.data.root === currentRoot)) { editorApplying = false; editorFailed = false; updateEditorActions(); document.getElementById('editor-status').textContent = 'Editor settings applied'; document.getElementById('editor-status').classList.remove('danger'); render(); }
+  if (event.data.type === 'editorReviewed' && event.data.root === currentRoot) { editorReviewing = false; updateEditorActions(); }
+  if (event.data.type === 'projectPreferencesSaved') { editorDirty = false; render(); }
+  if (event.data.type === 'computerSaved') { computerSaving = false; updateSaveActions(); document.getElementById('computer-status').textContent = 'Preferences saved.'; document.getElementById('computer-status').classList.remove('danger'); render(); }
+  if (event.data.type === 'computerInstallation') { computerForm.elements.namedItem('installationPath').value = event.data.value; fillInstallationPreferences(); updateSaveActions(); render(); }
+  if (event.data.type === 'gsudoPath') { computerForm.elements.namedItem('gsudoPath').value = event.data.value; document.getElementById('gsudo-path').open = true; updateSaveActions(); }
 });
 if (window.whamSidebarState) window.dispatchEvent(new MessageEvent('message', { data: window.whamSidebarState }));
 else render();

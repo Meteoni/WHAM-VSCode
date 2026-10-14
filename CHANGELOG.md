@@ -1,5 +1,42 @@
 # Changes
 
+## 1.5.11
+
+- Cards sharing an installed mod now share operation locking, progress and Stop, including across projects.
+- Switching C++ language services activates the selected service and preserves other editor settings.
+- Editor setup and discovery honor custom CompilerPath values in windhawk.ini, matching Test build and Verify.
+- Removing a project stops its pending work and disposes its watcher. Reopening starts a fresh project lifecycle.
+
+## 1.5.10
+
+- Detect user/global Scoop gsudo installations even when VS Code has an older PATH.
+- Accept quoted gsudo and Windhawk paths pasted into extension settings.
+- Remove temporary elevation diagnostics while retaining cache readiness and reuse checks.
+- Keep successful Test build and Verify quiet; reveal Output for warnings, failures, or an explicit Show log action.
+- Restore the Windows sudo approval note below its selector.
+- Keep Compile the same size while building or stopping, with a centered spinner or status.
+
+## 1.5.9
+
+- Check gsudo approval before each elevated operation; reopen a lost cache and verify a new cache is ready before launching the worker.
+- Preserve approval when saving unchanged elevation preferences or changing the C++ language service. Availability checks no longer save preferences or close approval.
+- Add elevation method, executable, process, and cache status to the Compile log for diagnosing repeated prompts.
+
+## 1.5.8
+
+- Disable Apply, Review, and save buttons when there are no pending changes; remove the Apply dot.
+- Enable Apply for missing or outdated editor configuration and keep failed actions available for retry.
+- Preserve edits made while settings are being saved.
+
+## 1.5.7
+
+- Place Apply’s pending-change dot on its top-right corner and keep the label centered.
+
+## 1.5.6
+
+- Simplify the Editor page with one Apply action and a compact Review button.
+- Show a pending-change dot on Apply; clear it after applying or reverting changes.
+
 ## 1.5.5
 
 - Split Project settings and Extension settings; keep Editor, Generation, and Git under Project settings.

@@ -4,7 +4,7 @@ Windhawk Source Amalgamation for VS Code.
 
 Write a Windhawk mod across several C++ files, then generate a single `.wh.cpp` to use in Windhawk. The output also keeps the information needed to recover those source files later.
 
-![WHAM's project sidebar beside a Windhawk mod with Markdown syntax highlighting](docs/images/wham-project.png)
+![WHAM project controls beside the mod's C++ source](docs/images/wham-project.png)
 
 ## Getting started
 
@@ -30,11 +30,13 @@ New projects get `src/`, `output/`, configuration, and Git setup. Generated outp
 
 If you edit generated output, WHAM pauses regeneration so your changes aren't overwritten. Restore those edits to source or explicitly discard them before generating again.
 
-**Compile** generates and installs the current mod in Windhawk, keeping its **Enabled** state. The first build starts disabled. The dropdown offers **Test build** without installing, **Verify syntax** for its declared architectures, and **Stop compilation** while a build is running. Click the mod name to preview its README and default settings in the sidebar. Use the Windhawk icon beside Refresh to open Windhawk and change installed settings.
+**Compile** generates and installs the current mod in Windhawk, keeping its **Enabled** state. The first build starts disabled. The dropdown offers **Test build** without installing, **Verify syntax** for its declared architectures, and **Stop compilation** while a build is running. Click the mod name to preview its README and default settings in the sidebar. Use the external-link button beside Refresh to open Windhawk and change installed settings.
+
+![WHAM mod details and README preview beside C++ source](docs/images/wham-details.png)
 
 The preview works without Windhawk. Compilation and installed-mod controls need a compatible Windhawk 2.0 CLI. See the [user guide](docs/guide.md) for configuration, CLI commands, and supported C++ constructs.
 
-Standard Windhawk installs need elevation for compilation and installed-mod changes. Choose **Windows sudo** (may require more prompts) or **gsudo** (once per VS Code session) under **Extension settings**. gsudo is found automatically on PATH when installed. **None** uses VS Code's current permissions. Saving local preferences does not change project files; **Apply editor settings** does.
+Standard Windhawk installs need elevation for compilation and installed-mod changes. Choose **Windows sudo** (may require more prompts) or **gsudo** (once per VS Code session) under **Extension settings**. WHAM detects gsudo on PATH or in Scoop. **None** uses VS Code's current permissions. Saving local preferences does not change project files; **Apply editor settings** does.
 
 ## Building
 

@@ -1,11 +1,26 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import type { InstallationPreferences } from './preferences';
 
 const elevationSessions = new Map<string, Promise<void>>();
+
+/** Resolve the same installed/portable toolchain layout for editor and build checks. */
+export async function readWindhawkPaths(root: string) {
+  let ini = '';
+  try {
+    const bytes = await fs.readFile(path.join(root, 'windhawk.ini'));
+    ini = bytes.subarray(0, 2).equals(Buffer.from([0xff, 0xfe])) ? bytes.subarray(2).toString('utf16le') : bytes.toString('utf8').replace(/^\uFEFF/, '');
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const storage = /\[Storage\]([\s\S]*?)(?:\r?\n\[|$)/i.exec(ini)?.[1] ?? '';
+  return {
+    compilerRoot: path.resolve(root, /^CompilerPath\s*=\s*(.+)$/im.exec(storage)?.[1].trim() ?? 'Compiler'),
+    engineRoot: path.resolve(root, /^EnginePath\s*=\s*(.+)$/im.exec(storage)?.[1].trim() ?? 'Engine')
+  };
+}
 
 /** Check availability without elevating or changing sudo/gsudo configuration. */
 export async function inspectElevation(preferences: InstallationPreferences): Promise<{ executable?: string; notice: string }> {
@@ -22,9 +37,15 @@ export async function inspectElevation(preferences: InstallationPreferences): Pr
     } catch { throw new Error('Windows sudo needs Windows 11 24H2 or newer and Inline mode enabled in Windows Settings. WHAM does not change this setting.'); }
     return { executable, notice: 'Windows sudo is ready. Each operation may request administrator approval.' };
   }
-  executable = preferences.gsudoPath;
+  executable = preferences.gsudoPath.trim().replace(/^(['"])(.*)\1$/, '$2');
   if (!executable) {
-    const candidates = (process.env.PATH ?? '').split(path.delimiter).map(directory => path.join(directory.replace(/^"|"$/g, ''), 'gsudo.exe'));
+    // Scoop adds its app directory to PATH. An already-running VS Code can
+    // still have the old PATH, so also check Scoop's stable current links.
+    const candidates = [...new Set([
+      ...(process.env.PATH ?? '').split(path.delimiter).map(directory => directory.trim().replace(/^(['"])(.*)\1$/, '$2')).filter(Boolean).map(directory => path.join(directory, 'gsudo.exe')),
+      path.join(process.env.SCOOP || path.join(os.homedir(), 'scoop'), 'apps', 'gsudo', 'current', 'gsudo.exe'),
+      path.join(process.env.SCOOP_GLOBAL || path.join(process.env.ProgramData || 'C:/ProgramData', 'scoop'), 'apps', 'gsudo', 'current', 'gsudo.exe')
+    ])];
     for (const candidate of candidates) {
       try { if ((await fs.stat(candidate)).isFile()) { executable = candidate; break; } } catch { /* Continue searching PATH. */ }
     }
@@ -34,7 +55,7 @@ export async function inspectElevation(preferences: InstallationPreferences): Pr
     const version = await promisify(execFile)(executable, ['--version'], { windowsHide: true, timeout: 5000 });
     if (!/^gsudo\s+v?\d/im.test(version.stdout)) throw new Error('Not gsudo.');
   } catch { throw new Error('The selected executable is not a working gsudo installation.'); }
-  return { executable, notice: preferences.reuseSession ? 'gsudo is ready. Approval is reused until this VS Code session ends.' : 'gsudo is ready. Each operation requests administrator approval.' };
+  return { executable, notice: 'gsudo is ready. Approval is reused until this VS Code session ends.' };
 }
 
 /** Close only the cache WHAM explicitly opened for its extension-host process. */
@@ -72,21 +93,50 @@ export async function runWindhawkProcess(executable: string, args: string[], inp
   const helper = path.join(__dirname, `windhawk-bridge-${process.arch}.exe`);
   const event = 'Local\\WHAM-' + randomBytes(16).toString('hex');
   const elevated = options.elevation && options.elevation.elevation !== 'none' ? await inspectElevation(options.elevation) : undefined;
-  if (elevated && options.elevation?.elevation === 'gsudo' && options.elevation.reuseSession) {
-    let opening = elevationSessions.get(elevated.executable!);
-    if (!opening) {
-      // The cache intentionally outlives this command; an owned process job
-      // would close it as soon as the cache-start command returned.
-      opening = promisify(execFile)(elevated.executable!, ['cache', 'on', '--pid', String(process.pid), '--duration', '-1'], { windowsHide: true, signal: options.signal, timeout: 120000 })
-        .then(() => {}).catch(async error => {
-          elevationSessions.delete(elevated.executable!);
-          await promisify(execFile)(elevated.executable!, ['cache', 'off', '--pid', String(process.pid)], { windowsHide: true, timeout: 5000 }).catch(() => {});
-          const canceled = error.code === 999 || error.code === 'ABORT_ERR';
-          throw new WindhawkError(canceled ? 'Operation canceled.' : error.stderr || 'gsudo could not start an elevation session.', canceled ? 'CANCELED' : 'ELEVATION_FAILED');
-        });
-      elevationSessions.set(elevated.executable!, opening);
+  if (elevated && options.elevation?.elevation === 'gsudo') {
+    const previousOpening = elevationSessions.get(elevated.executable!);
+    await previousOpening;
+    const readCacheStatus = async () => {
+      try {
+        const result = await promisify(execFile)(elevated.executable!, ['status', '--json'], { windowsHide: true, signal: options.signal, timeout: 5000 });
+        const status = JSON.parse(result.stdout);
+        if (typeof status.CacheAvailable !== 'boolean' || typeof status.IsElevated !== 'boolean') throw new WindhawkError('gsudo could not report its cache status.', 'ELEVATION_FAILED');
+        return status;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ABORT_ERR') throw new WindhawkError('Operation canceled.', 'CANCELED');
+        throw error;
+      }
+    };
+    let status = await readCacheStatus();
+    if (!status.IsElevated && !status.CacheAvailable) {
+      if (status.CacheMode === 'Disabled') throw new WindhawkError('gsudo credential caching is disabled. Enable it in gsudo to reuse approval.', 'ELEVATION_FAILED');
+      let opening = elevationSessions.get(elevated.executable!);
+      if (opening === previousOpening) {
+        // The cache intentionally outlives this command; an owned process job
+        // would close it as soon as the cache-start command returned.
+        opening = promisify(execFile)(elevated.executable!, ['cache', 'on', '--pid', String(process.pid), '--duration', '-1'], { windowsHide: true, signal: options.signal, timeout: 120000 })
+          .then(async () => {
+            const deadline = Date.now() + 5000;
+            do {
+              status = await readCacheStatus();
+              if (status.CacheAvailable || status.IsElevated) return;
+              if (options.signal?.aborted) throw new WindhawkError('Operation canceled.', 'CANCELED');
+              await new Promise(resolve => setTimeout(resolve, 250));
+            } while (Date.now() < deadline);
+            throw new WindhawkError('gsudo approval is unavailable after starting its cache. Check gsudo’s configuration and retry.', 'ELEVATION_FAILED');
+          }).catch(async error => {
+            elevationSessions.delete(elevated.executable!);
+            await promisify(execFile)(elevated.executable!, ['cache', 'off', '--pid', String(process.pid)], { windowsHide: true, timeout: 5000 }).catch(() => {});
+            if (error instanceof WindhawkError) throw error;
+            const canceled = error.code === 999 || error.code === 'ABORT_ERR';
+            throw new WindhawkError(canceled ? 'Operation canceled.' : error.stderr || 'gsudo could not start an elevation session.', canceled ? 'CANCELED' : 'ELEVATION_FAILED');
+          });
+        elevationSessions.set(elevated.executable!, opening);
+      }
+      await opening;
+      status = await readCacheStatus();
     }
-    await opening;
+    if (!status.IsElevated && !status.CacheAvailable) throw new WindhawkError('gsudo approval was lost before launching the operation. Retry.', 'ELEVATION_FAILED');
   }
   if (options.signal?.aborted) throw new WindhawkError('Operation canceled.', 'CANCELED');
   // gsudo's cache is bound to its direct caller. Launch it from the extension

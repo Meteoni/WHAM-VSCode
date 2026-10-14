@@ -74,9 +74,11 @@ pre { padding: 10px; background: var(--vscode-textCodeBlock-background); white-s
 
 .main-navigation { flex-shrink: 0; margin: 12px 12px 14px; }
 #wham-pages { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 0 12px 12px; }
-.compile-split > .primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.compile-split > .primary { position: relative; display: inline-flex; align-items: center; justify-content: center; }
 .compile-split > .primary[aria-busy="true"] { opacity: 1; }
-.compile-spinner { width: 12px; height: 12px; flex-shrink: 0; box-sizing: border-box; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: wham-compile-spin 1s linear infinite; }
+.compile-split > .primary[aria-busy="true"] .compile-caption { visibility: hidden; }
+.compile-spinner { position: absolute; inset: 0; margin: auto; width: 12px; height: 12px; box-sizing: border-box; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: wham-compile-spin 1s linear infinite; }
+.compile-stopping { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
 @keyframes wham-compile-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .compile-spinner { animation: none; } }
 
@@ -85,3 +87,6 @@ pre { padding: 10px; background: var(--vscode-textCodeBlock-background); white-s
 .git-files { margin: 8px 0 16px; padding-left: 18px; font-size: 12px; }
 .git-files li { margin: 3px 0; overflow-wrap: anywhere; }
 .git-files code { font-family: var(--vscode-editor-font-family, monospace); font-size: inherit; }
+#editor-config label { margin: 16px 0 4px; }
+#editor-config .toolbar { margin-top: 16px; }
+#editor-status:empty { display: none; }

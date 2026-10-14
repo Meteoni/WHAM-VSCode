@@ -4,7 +4,7 @@ const {execFile}=require('node:child_process'),{promisify}=require('node:util');
 const {runWindhawkProcess,closeElevationSessions}=require('../dist/windhawk');
 (async()=>{
   const executable=process.argv[2];if(!executable)throw Error('Pass gsudo.exe, or a placeholder and sudo as the third argument. Windows may request UAC.');
-  const elevation={elevation:process.argv[3]==='sudo'?'sudo':'gsudo',gsudoPath:executable,reuseSession:process.argv[3]!=='sudo'};
+  const elevation={elevation:process.argv[3]==='sudo'?'sudo':'gsudo',gsudoPath:executable};
   try {
     const input='汉字 source with spaces\n';
     const result=await runWindhawkProcess(process.execPath,['-e',"let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',text=>input+=text);process.stdin.on('end',()=>{console.error('fixture progress');console.log(JSON.stringify({input,args:process.argv.slice(1)}));});",'汉字 path','quoted "text"'],input,{elevation});
@@ -20,6 +20,6 @@ const {runWindhawkProcess,closeElevationSessions}=require('../dist/windhawk');
     // process; inspect liveness from a synthetic elevated worker instead.
     const alive=await runWindhawkProcess(process.execPath,['-e',`try{process.kill(${descendant},0);console.log('alive');}catch(error){console.log(error.code);}`],undefined,{elevation});
     assert.equal(alive.stdout.trim(),'ESRCH','Stop removes elevated compiler descendants');
-    console.log(elevation.elevation+' checks passed: Unicode stdin/argv, live stderr, cancellation, and elevated descendant cleanup'+(elevation.reuseSession?', plus session cache reuse':'')+'. No Windhawk mod changed.');
+    console.log(elevation.elevation+' checks passed: Unicode stdin/argv, live stderr, cancellation, and elevated descendant cleanup'+(elevation.elevation==='gsudo'?', plus session cache reuse':'')+'. No Windhawk mod changed.');
   } finally { await closeElevationSessions(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});

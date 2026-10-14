@@ -4,7 +4,6 @@ import { editorDefaults, EditorSettings } from './setup';
 export interface InstallationPreferences {
   elevation: 'none' | 'sudo' | 'gsudo';
   gsudoPath: string;
-  reuseSession?: boolean;
 }
 export interface LocalPreferences {
   version: 2;

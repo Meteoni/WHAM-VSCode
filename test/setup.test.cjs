@@ -7,7 +7,8 @@ const { execFileSync } = require('node:child_process');
 const { parse } = require('jsonc-parser');
 const { defaults } = require('../dist/config');
 const { generateEntry, restoreSource } = require('../dist/engine');
-const { setupProject, createInitialCommit, gitStatus, editorConfiguration, readEditorSettings, mergeRecoveries } = require('../dist/setup');
+const { setupProject, createInitialCommit, gitStatus, editorConfiguration, readEditorSettings, mergeRecoveries, findWindhawk } = require('../dist/setup');
+const { readWindhawkPaths } = require('../dist/windhawk');
 const { nodeFiles, commitRestore } = require('../dist/io');
 
 test('new Git setup and ignore rules are idempotent and preserve an enclosing repository', async () => {
@@ -121,4 +122,55 @@ test('initial commit reports missing identity without changing Git identity or r
     assert.ok((await fs.stat(path.join(root, 'windhawk-amalgamation.json'))).isFile());
     assert.ok((await gitStatus(root, git)).changes > 0);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('editor service transitions activate only the selected services and preserve custom clangd settings', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-service-transition-'));
+  const installation = path.join(root, 'windhawk');
+  try {
+    for (const file of ['Compiler/bin/clang++.exe', 'Compiler/bin/clangd.exe', 'Compiler/include/windhawk_api.h']) {
+      const target = path.join(installation, file); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, 'fixture');
+    }
+    await fs.mkdir(path.join(root, '.vscode'));
+    await fs.writeFile(path.join(root, '.vscode/settings.json'), JSON.stringify({ 'clangd.arguments': ['--log=verbose'], 'clangd.enable': false }));
+    const project = { root, config: { ...defaults } };
+    for (const integration of ['clangd', 'cpp', 'both', 'cpp', 'clangd', 'both']) {
+      const files = await editorConfiguration(project, { installationPath: installation, integration, indentStyle: 'spaces', indentSize: 4 });
+      for (const [file, bytes] of files) { const target = path.join(root, file); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, bytes); }
+      const settings = JSON.parse(files.get('.vscode/settings.json'));
+      assert.equal(settings['clangd.enable'], integration !== 'cpp');
+      assert.equal(settings['C_Cpp.intelliSenseEngine'], integration === 'clangd' ? 'disabled' : 'default');
+      assert.ok(settings['clangd.arguments'].includes('--log=verbose'));
+      assert.equal((await readEditorSettings(root)).integration, integration);
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('custom Windhawk CompilerPath is shared by discovery, editor setup and build path resolution', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-custom-toolchain-'));
+  const installation = path.join(root, 'windhawk'), compilerRoot = path.join(installation, 'Toolchain');
+  const originalHome = process.env.WINDHAWK_HOME;
+  try {
+    for (const file of ['bin/clang++.exe', 'bin/clangd.exe', 'include/windhawk_api.h']) {
+      const target = path.join(compilerRoot, file); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, 'fixture');
+    }
+    const project = { root, config: { ...defaults } };
+    process.env.WINDHAWK_HOME = installation;
+    for (const compilerPath of ['Toolchain', compilerRoot]) {
+      const ini = '[Storage]\r\nCompilerPath=' + compilerPath + '\r\nEnginePath=Engine\\2.0.0\r\n';
+      await fs.writeFile(path.join(installation, 'windhawk.ini'), Buffer.concat([Buffer.from([255, 254]), Buffer.from(ini, 'utf16le')]));
+      assert.deepEqual(await readWindhawkPaths(installation), { compilerRoot, engineRoot: path.join(installation, 'Engine/2.0.0') });
+      assert.ok((await findWindhawk()).includes(installation));
+      const files = await editorConfiguration(project, { installationPath: installation, integration: 'both', indentStyle: 'spaces', indentSize: 4 });
+      const properties = JSON.parse(files.get('.vscode/c_cpp_properties.json')).configurations[0];
+      assert.equal(properties.compilerPath, path.join(compilerRoot, 'bin/clang++.exe').split(path.sep).join('/'));
+      assert.equal(properties.forcedInclude[0], path.join(compilerRoot, 'include/windhawk_api.h').split(path.sep).join('/'));
+      assert.equal(JSON.parse(files.get('.vscode/settings.json'))['clangd.path'], path.join(compilerRoot, 'bin/clangd.exe').split(path.sep).join('/'));
+      for (const [file, bytes] of files) { const target = path.join(root, file); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, bytes); }
+      assert.equal((await readEditorSettings(root)).installationPath, installation);
+    }
+  } finally {
+    if (originalHome === undefined) delete process.env.WINDHAWK_HOME; else process.env.WINDHAWK_HOME = originalHome;
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

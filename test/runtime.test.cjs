@@ -20,7 +20,7 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
   await fs.mkdir(path.join(root, 'installation')); await fs.writeFile(path.join(root, 'installation/windhawk.ini'), '[Storage]\nPortable=1\n');
   let libraryFileName, installedSource, disabled = true, fail = false, holdCompile, releaseCompile, oldVersion = false, parserUnavailable = false, sourceUnavailable = false, compileWarnings = false, failEnable = false, holdEnable = false, releaseEnable;
   const calls = [], detailViews = [];
-  let holdTest = false, testStarted = false, testBuilds = 0, holdVerify = false, verifyStarted = false;
+  let holdTest = false, testStarted = false, testBuilds = 0, holdVerify = false, verifyStarted = false, checkWarnings=false, failCheck=false,customVerifyWarnings=false,customVerifyFailure=false;
   let coreReads = 0, runtimeReads = 0, outputShows = 0, generations = 0, sidebarView, editorPanels = 0;
   const fakeDetails = {
     createDetailsView: (extensionUri, webview, data, callbacks) => {
@@ -46,12 +46,12 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
       verifyStarted = true; assert.ok(args.includes('-fsyntax-only'));
       assert.equal(options.elevation, undefined, 'Syntax checks stay unelevated');
       if (holdVerify) await new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new WindhawkError('Stopped','CANCELED')),{once:true}));
-      return {code:0,stdout:'',stderr:''};
+      return {code:customVerifyFailure?1:0,stdout:'',stderr:customVerifyWarnings?'fixture.cpp:1:1: warning: fixture warning':''};
     },
     readInstalledMod: async (root, id) => { runtimeReads++; assert.equal(id,'local@runtime-test'); return {config:installedSource?{disabled,libraryFileName}:null}; },
     readInstalledSources: async (root, ids) => { runtimeReads++; assert.deepEqual(ids,['local@runtime-test']); if(sourceUnavailable)throw new WindhawkError('Source export unavailable.','INVALID_REQUEST'); return new Map(installedSource?[['local@runtime-test',installedSource]]:[]); },
     runWindhawkCli: async (root, args, input, onOutput, signal, elevation) => {
-      assert.deepEqual(elevation, { elevation: 'gsudo', gsudoPath: '', reuseSession: true }, 'Installed-mod writes use this installation’s local elevation preference');
+      assert.deepEqual(elevation, { elevation: 'gsudo', gsudoPath: '' }, 'Installed-mod writes use this installation’s local elevation preference');
       calls.push({ args, input });
       if (args[1] === 'install') {
         if (holdCompile) await new Promise((resolve,reject) => { releaseCompile = resolve; signal.addEventListener('abort',()=>reject(new WindhawkError('Stopped','CANCELED')),{once:true}); });
@@ -60,7 +60,7 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
           throw new WindhawkError('Compiler failed.', 'COMPILER_FAILED', { output: `mod.wh.cpp:${line}:1: error: fixture compile error\n` });
         }
         installedSource = input.replace(/\r?\n/g,'\r\n');
-        if (args.includes('--disabled')) disabled = true;
+        disabled = args.includes('--disabled');
         libraryFileName = 'runtime-test_' + calls.length + '.dll';
         return { id: 'local@runtime-test', config: {libraryFileName}, warnings: compileWarnings ? 'fixture warning' : '' };
       }
@@ -73,7 +73,7 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
   let receive, provider, onSave, onChange;
   const commands = new Map(), watchers = [], messages = [], documents = [], stored = {}, problems = new Map(), notices = [];
   const globalStored = { localPreferences: { version: 1, computer: { installationPath: path.join(root, 'installation'), integration: 'cpp',
-    installations: { [path.resolve(root, 'installation').toLowerCase()]: { elevation: 'gsudo', gsudoPath: '', reuseSession: true } } }, projects: {} } };
+    installations: { [path.resolve(root, 'installation').toLowerCase()]: { elevation: 'gsudo', gsudoPath: '' } } }, projects: {} } };
   const disposable = () => ({ dispose() {} });
   const Uri = {
     file(file) { return { fsPath: file, scheme: 'file', toString: () => 'file:' + file }; },
@@ -120,6 +120,8 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
         assert.ok(source.includes('runtime-test')); assert.equal(signal.aborted,false);
         if (syntaxOnly && holdVerify) await new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(new WindhawkError('Stopped','CANCELED')),{once:true}));
         if (!syntaxOnly && holdTest) await new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(new WindhawkError('Stopped','CANCELED')),{once:true}));
+        if(failCheck)throw new WindhawkError('Fixture compiler failure','COMPILER_FAILED');
+        return {warnings:checkWarnings};
       }};
     }
     return load.call(this, name, ...args);
@@ -165,7 +167,16 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     const beforeTest={calls:calls.length,source:installedSource,library:libraryFileName};
     await receive({action:'testCompile',root,entry});
     assert.equal(calls.length,beforeTest.calls);assert.equal(installedSource,beforeTest.source);assert.equal(libraryFileName,beforeTest.library);
-    assert.equal(outputShows,1,'Test build opens compiler output');
+    assert.equal(outputShows,0,'Clean Test build stays quiet');
+    await receive({action:'verify',root,entry});assert.equal(outputShows,0,'Clean Verify stays quiet');
+    checkWarnings=true;
+    let reveals=outputShows;await receive({action:'testCompile',root,entry});assert.equal(outputShows,reveals+1,'Test build warnings reveal Output');
+    reveals=outputShows;await receive({action:'verify',root,entry});assert.equal(outputShows,reveals+1,'Verify warnings reveal Output');
+    checkWarnings=false;failCheck=true;
+    reveals=outputShows;await receive({action:'testCompile',root,entry});assert.equal(outputShows,reveals+1,'Test build failures reveal Output');
+    reveals=outputShows;await receive({action:'verify',root,entry});assert.equal(outputShows,reveals+1,'Verify failures reveal Output');
+    failCheck=false;
+    reveals=outputShows;await receive({action:'logs'});assert.equal(outputShows,reveals+1,'Explicit Show log always reveals Output');
     const beforeStop={source:installedSource,library:libraryFileName,proof:JSON.stringify(globalStored.compiledSnapshots),notices:notices.length};
     for (const action of ['compile','testCompile','verify']) {
       holdCompile=action==='compile'; releaseCompile=undefined;
@@ -179,6 +190,7 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
       assert.equal(installedSource,beforeStop.source);assert.equal(libraryFileName,beforeStop.library);assert.equal(JSON.stringify(globalStored.compiledSnapshots),beforeStop.proof);
     }
     assert.equal(notices.length,beforeStop.notices,'Cancellation does not show failure notifications');
+    assert.equal(outputShows,reveals+1,'Stopped checks do not reveal Output');
     holdCompile=holdTest=holdVerify=false;
     await new Promise(resolve=>setTimeout(resolve,450)); // Settle the earlier Draft debounce.
     const beforeToggle={calls:calls.length,reads:runtimeReads,core:coreReads,generations,source:installedSource,output:outputShows};
@@ -198,6 +210,44 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     failEnable=true;await receive({action:'enable',root,entry,enabled:true});failEnable=false;
     assert.equal(current().runtime.enabled,false);assert.equal(current().runtime.busy,false);assert.match(current().runtime.error,/Toggle failed/);
     await receive({action:'enable',root,entry,enabled:true});assert.equal(current().runtime.enabled,true);
+    // Different cards/projects can target the same installed mod. They share one
+    // operation owner, and either card can stop that owner's compilation.
+    const peerRoot = path.join(root, 'peer-project'), peerEntry = path.join(peerRoot, 'src/mod.cpp');
+    await fs.mkdir(path.dirname(peerEntry), { recursive: true });
+    await fs.writeFile(peerEntry, original.replace('#include "header.h"', 'int shared = 1;'));
+    await fs.writeFile(path.join(peerRoot, 'windhawk-amalgamation.json'), JSON.stringify({ ...defaults, generate: 'manual' }));
+    globalStored.recentProjects = [peerRoot];
+    mock.window.showOpenDialog = async () => [Uri.file(peerRoot)];
+    await receive({ action: 'openProject', browse: true });
+    const peer = () => messages.filter(message => message.type === 'state').at(-1)?.projects.find(project => project.root === peerRoot)?.entries[0];
+    await until(() => peer()?.runtime.installed);
+    holdCompile = true; releaseCompile = undefined;
+    let sharedCompile = receive({ action: 'compile', root, entry });
+    await until(() => releaseCompile);
+    assert.equal(peer().runtime.busy, true); assert.equal(peer().runtime.operation, 'compile');
+    const sharedCalls = calls.length;
+    await receive({ action: 'enable', root: peerRoot, entry: peerEntry, enabled: false });
+    await receive({ action: 'compile', root: peerRoot, entry: peerEntry });
+    assert.equal(calls.length, sharedCalls, 'Peer writes cannot overwrite the active compilation');
+    releaseCompile(); await sharedCompile;
+    assert.equal(peer().runtime.busy, false); assert.equal(peer().runtime.enabled, true);
+    releaseCompile = undefined;
+    sharedCompile = receive({ action: 'compile', root, entry }); await until(() => releaseCompile);
+    const sharedProof = JSON.stringify(globalStored.compiledSnapshots);
+    await receive({ action: 'stopCompile', root: peerRoot, entry: peerEntry }); await sharedCompile;
+    assert.equal(JSON.stringify(globalStored.compiledSnapshots), sharedProof);
+    assert.equal(peer().runtime.busy, false); holdCompile = false;
+    holdEnable = true; releaseEnable = undefined;
+    const sharedToggle = receive({ action: 'enable', root: peerRoot, entry: peerEntry, enabled: false });
+    await until(() => releaseEnable); assert.equal(current().runtime.busy, true);
+    const toggleCalls = calls.length;
+    await receive({ action: 'enable', root, entry, enabled: true });
+    assert.equal(calls.length, toggleCalls);
+    releaseEnable(); await sharedToggle; holdEnable = false;
+    assert.equal(current().runtime.enabled, false); assert.equal(peer().runtime.enabled, false);
+    await receive({ action: 'enable', root, entry, enabled: true });
+    assert.equal(peer().runtime.enabled, true);
+    delete mock.window.showOpenDialog;
     sourceUnavailable=true;
     await receive({action:'compile',root,entry});
     assert.equal(current().runtime.changesPending,false,'A missing source snapshot is not marked uncompiled');
@@ -264,6 +314,14 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     assert.equal(detailViews.at(-1).data.parsed.metadata.name, 'Runtime test', 'Older Windhawk still has a Draft preview');
     assert.ok(detailViews.at(-1).data.source.includes('int shared = 7'));
     await detailViews.at(-1).callbacks.onNavigate('project');
+    // The optional custom compiler follows the same reveal policy.
+    globalStored.localPreferences.computer.installationPath='';
+    await receive({action:'projectPreferences',root,settings:{integration:'default'}});
+    mock.window.showInputBox=async options=>options.title==='Compiler executable'?'fixture-compiler.exe':JSON.stringify(['-fsyntax-only']);
+    let customOutput=outputShows;await receive({action:'verify',root,entry});assert.equal(outputShows,customOutput,'A clean custom compiler stays quiet');
+    customVerifyWarnings=true;await receive({action:'verify',root,entry});assert.equal(outputShows,customOutput+1,'Custom compiler warnings reveal Output');
+    customVerifyWarnings=false;customVerifyFailure=true;customOutput=outputShows;
+    await receive({action:'verify',root,entry});assert.equal(outputShows,customOutput+1,'Custom compiler failures reveal Output');
   } finally {
     for(const subscription of context.subscriptions)subscription.dispose();
     await fs.rm(root,{recursive:true,force:true});

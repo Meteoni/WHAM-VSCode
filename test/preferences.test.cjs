@@ -20,7 +20,7 @@ test('legacy choices migrate to one local installation and project language pref
 });
 
 test('migration preserves an existing global installation and its elevation preferences', async () => {
-  const computer={installationPath:'C:/global',integration:'clangd',installations:{'c:/global':{elevation:'gsudo',gsudoPath:'',reuseSession:true}}};
+  const computer={installationPath:'C:/global',integration:'clangd',installations:{'c:/global':{elevation:'gsudo',gsudoPath:''}}};
   const data={localPreferences:{version:1,computer,projects:{one:{installationPath:'C:/old',integration:'cpp'}}}};
   const global={get:(key,fallback)=>data[key]??fallback,update:async(key,value)=>{data[key]=value;}};
   const preferences=await loadLocalPreferences(global,{get:(key,fallback)=>fallback});
