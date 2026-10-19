@@ -1,5 +1,10 @@
 # Changes
 
+## 1.5.12
+
+- Write recovery metadata as a foldable section with lines of at most 120 characters, including long directives and configuration strings.
+- Continue recovering existing v1 and v2 outputs. Regeneration upgrades them to v3.
+
 ## 1.5.11
 
 - Cards sharing an installed mod now share operation locking, progress and Stop, including across projects.

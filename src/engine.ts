@@ -11,14 +11,32 @@ const utf8 = (bytes: Buffer): string => {
   return text;
 };
 
-/** Normalize legacy JSON markers and compact v2 boundaries for the same recovery algorithm. */
+/** Normalize all supported containers for the same recovery algorithm. */
 function recoveryMarkers(source: string) {
-  const comments = scanSource(source).records, footer = comments.at(-1);
-  const compact = footer?.text.startsWith('// WHAM@2 recovery ');
-  const manifest = compact ? JSON.parse(footer!.text.slice('// WHAM@2 recovery '.length)) as Manifest : undefined;
+  const comments = scanSource(source).records;
+  let footer = comments.at(-1), manifest: Manifest | undefined;
+  const version = footer?.text === '// WHAM@3 recovery-end' ? 3 : footer?.text.startsWith('// WHAM@2 recovery ') ? 2 : 1;
+  if (version === 3) {
+    const opening = comments.at(-2), region = '// #region WHAM recovery', lines: string[] = [];
+    if (opening?.text !== '// WHAM@3 recovery-begin' || !footer) throw new Error('Missing v3 recovery opening.');
+    const formatStart = source.lastIndexOf('\n', opening.start - 2) + 1;
+    const regionStart = source.lastIndexOf('\n', formatStart - 2) + 1;
+    if (source.slice(regionStart, opening.start).replace(/\r\n/g, '\n') !== region + '\n// clang-format off\n') throw new Error('Missing recovery folding region.');
+    const ending = /^\/\/ clang-format on\r?\n\/\/ #endregion(?:\r?\n|$)/.exec(source.slice(footer.end));
+    if (!ending || footer.end + ending[0].length !== source.length) throw new Error('Missing or misplaced recovery folding end.');
+    for (const line of source.slice(opening.end, footer.start).replace(/\r?\n$/, '').split(/\r?\n/)) {
+      if (line.startsWith('//+ ') && lines.length) lines[lines.length - 1] += line.slice(4);
+      else if (line.startsWith('// ')) lines.push(line.slice(3));
+      else throw new Error('Malformed v3 recovery comment.');
+    }
+    manifest = JSON.parse(lines.join('\n')) as Manifest;
+    footer = { start: regionStart, end: source.length, text: footer.text };
+    comments.splice(-2, 2, footer);
+  } else if (version === 2) manifest = JSON.parse(footer!.text.slice('// WHAM@2 recovery '.length)) as Manifest;
+  const compact = version !== 1;
   const data = new Map<number, RecoveryData>(), used = new Set<number>();
   if (manifest) {
-    if (manifest.type !== 'manifest' || manifest.version !== 2 || !Array.isArray(manifest.records)) throw new Error('Malformed v2 recovery data.');
+    if (manifest.type !== 'manifest' || manifest.version !== version || !Array.isArray(manifest.records)) throw new Error('Malformed recovery data.');
     for (const record of manifest.records) {
       if (!record || !['include', 'transform'].includes(record.type) || !Number.isSafeInteger(record.id) || record.id < 1 || data.has(record.id)) throw new Error('Invalid or duplicate recovery data ID.');
       if (record.directive !== undefined && typeof record.directive !== 'string') throw new Error('Invalid original directive.');
@@ -33,21 +51,22 @@ function recoveryMarkers(source: string) {
       value = JSON.parse(comment.text.slice('// WHAM@1 '.length));
     } else if (comment === footer) value = manifest;
     else {
-      const opening = /^\/\/ WHAM@2 (begin|transform) ([1-9]\d*): (.+)$/.exec(comment.text);
-      const closing = /^\/\/ WHAM@2 (end|end-transform) ([1-9]\d*)$/.exec(comment.text);
+      const opening = /^\/\/ WHAM@([23]) (begin|transform) ([1-9]\d*): (.+)$/.exec(comment.text);
+      const closing = /^\/\/ WHAM@([23]) (end|end-transform) ([1-9]\d*)$/.exec(comment.text);
+      if (Number((opening ?? closing)?.[1]) !== version) throw new Error('Boundary format does not match manifest.');
       if (opening) {
-        const id = Number(opening[2]), item = data.get(id), type = opening[1] === 'begin' ? 'include' : 'transform';
-        if (!item || item.type !== type || used.has(id) || opening[3] !== (type === 'include' ? item.path : item.kind)) throw new Error('Boundary does not match recovery data.');
+        const id = Number(opening[3]), item = data.get(id), type = opening[2] === 'begin' ? 'include' : 'transform';
+        if (!item || item.type !== type || used.has(id) || opening[4] !== (type === 'include' ? item.path : item.kind)) throw new Error('Boundary does not match recovery data.');
         used.add(id);
         value = { ...item, original: Buffer.from(item.directive ?? '', 'utf8').toString('base64'), before: item.separatorBefore ?? '', tail: item.separatorAfter ?? '' };
-      } else if (closing) value = { type: closing[1] === 'end' ? 'include-end' : 'transform-end', id: Number(closing[2]) };
+      } else if (closing) value = { type: closing[2] === 'end' ? 'include-end' : 'transform-end', id: Number(closing[3]) };
       else throw new Error('Malformed or unsupported WHAM boundary.');
     }
     if (!value || typeof value !== 'object' || typeof value.type !== 'string') throw new Error('Malformed recovery record.');
     return { ...comment, value };
   });
   if (compact && used.size !== data.size) throw new Error('Unused recovery data.');
-  if (records.at(-1)?.value.type === 'manifest' && records.at(-1)!.value.version !== (compact ? 2 : 1)) throw new Error('Unsupported WHAM format version.');
+  if (records.at(-1)?.value.type === 'manifest' && records.at(-1)!.value.version !== version) throw new Error('Unsupported WHAM format version.');
   return records;
 }
 
@@ -64,9 +83,9 @@ export async function generateEntry(project: Project, entryPath: string, files: 
         ...(record.original ? { directive: record.original } : {}),
         ...(record.before ? { separatorBefore: record.before } : {}), ...(record.tail ? { separatorAfter: record.tail } : {}),
         ...(record.hash !== undefined ? { hash: record.hash } : {}) });
-      return `// WHAM@2 ${record.type === 'include' ? 'begin' : 'transform'} ${record.id}: ${record.path ?? record.kind}\n`;
+      return `// WHAM@3 ${record.type === 'include' ? 'begin' : 'transform'} ${record.id}: ${record.path ?? record.kind}\n`;
     }
-    return `// WHAM@2 ${record.type === 'include-end' ? 'end' : 'end-transform'} ${record.id}\n`;
+    return `// WHAM@3 ${record.type === 'include-end' ? 'end' : 'end-transform'} ${record.id}\n`;
   };
   const sourceRoot = path.resolve(project.root, project.config.sourceDirectory);
   let nextId = 1, generatedSize = 0;
@@ -167,9 +186,22 @@ export async function generateEntry(project: Project, entryPath: string, files: 
     const rootRelative = path.posix.relative(project.config.sourceDirectory, root);
     const config = { ...project.config, entries: [rootRelative.replace(/([*?\[\]{}()!+@])/g, '[$1]')], exclude: [] };
     const tail = body && !body.endsWith('\n') ? '\n' : '';
-    const manifest: Manifest = { type: 'manifest', version: 2, root, files: [...manifestFiles.values()].sort((a, b) => a.path.localeCompare(b.path)), config, tail,
+    const manifest: Manifest = { type: 'manifest', version: 3, root, files: [...manifestFiles.values()].sort((a, b) => a.path.localeCompare(b.path)), config, tail,
       records: recoveryData.sort((left, right) => left.id - right.id) };
-    const container = body + tail + '// WHAM@2 recovery ' + JSON.stringify(manifest) + '\n';
+    // Escape literal backslashes so even a long run can be wrapped without a
+    // trailing backslash splicing two C++ comment lines. Recovery rejoins //+ lines.
+    const footerLines: string[] = [];
+    for (const line of JSON.stringify(manifest, null, 2).replace(/\\\\/g, '\\u005c').split('\n')) {
+      for (let start = 0; start < line.length;) {
+        let end = Math.min(start + 116, line.length);
+        if (end < line.length && /[\uD800-\uDBFF]/.test(line[end - 1])) end--;
+        if (line[end - 1] === '\\') end--;
+        footerLines.push((start ? '//+ ' : '// ') + line.slice(start, end));
+        start = end;
+      }
+    }
+    const container = body + tail + '// #region WHAM recovery\n// clang-format off\n// WHAM@3 recovery-begin\n' + footerLines.join('\n') +
+      '\n// WHAM@3 recovery-end\n// clang-format on\n// #endregion\n';
     if (Buffer.byteLength(container) > 64 * 1024 * 1024) throw new Error('Recovery container exceeds 64 MiB.');
     result.bytes = Buffer.from(container);
     // Recompute spans against the final container so nested includes and guards
@@ -210,7 +242,7 @@ export function restoreSource(bytes: Buffer): RestoreResult {
   const footer = records.at(-1);
   if (!footer || footer.value.type !== 'manifest' || footer.end !== source.length) throw new Error('Missing or misplaced WHAM footer manifest.');
   const manifest = footer.value as Manifest;
-  if (![1, 2].includes(manifest.version) || !Array.isArray(manifest.files) || manifest.files.length > 10000) throw new Error('Unsupported or malformed manifest.');
+  if (![1, 2, 3].includes(manifest.version) || !Array.isArray(manifest.files) || manifest.files.length > 10000) throw new Error('Unsupported or malformed manifest.');
   portablePath(manifest.root); validateConfig(manifest.config);
   if (manifest.tail !== '' && manifest.tail !== '\n') throw new Error('Invalid root padding.');
   const fileRecords = new Map<string, Manifest['files'][number]>(), cases = new Set<string>();

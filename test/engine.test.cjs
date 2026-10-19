@@ -50,12 +50,12 @@ test('hand-constructed compact v2 container restores exact directive and missing
 test('compact markers keep recovery fields in the footer and reject mismatched or unused data', async () => {
   const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\r\n', 'src/a.h': 'int a;' });
   const source = generated.bytes.toString();
-  assert.ok(source.startsWith('// WHAM@2 begin 1: src/a.h\n'));
-  const body = source.slice(0, source.indexOf('// WHAM@2 recovery '));
+  assert.ok(source.startsWith('// WHAM@3 begin 1: src/a.h\n'));
+  const body = source.slice(0, source.indexOf('// #region WHAM recovery'));
   assert.ok(!body.includes('original') && !body.includes('before') && !body.includes('{'));
-  assert.ok(source.includes('"directive":"#include \\"a.h\\"\\r\\n"'));
+  assert.ok(source.includes('"directive": "#include \\"a.h\\"\\r\\n"'));
   for (const broken of [source.replace('begin 1: src/a.h', 'begin 1: src/other.h'), source.replace('end 1', 'end 99'),
-    source.replace('"id":1', '"id":2'), source.replace('"records":[', '"records":[{"type":"include","id":99,"path":"src/a.h"},')]) assert.throws(() => restoreSource(Buffer.from(broken)));
+    source.replace('"id": 1', '"id": 2'), source.replace('"records": [', '"records": [\n// {"type":"include","id":99,"path":"src/a.h"},')]) assert.throws(() => restoreSource(Buffer.from(broken)));
 });
 test('nested source preserves Windhawk metadata and explicit included cpp', async () => {
   const metadata = '// ==WindhawkMod==\n// @id demo\n// ==/WindhawkMod==\n/*\n# include "not-real.h"\n*/\n';
@@ -133,18 +133,18 @@ test('angle expansion is optional and uses configured directories', async () => 
   assert.equal(recovered.files.size, 2);
 });
 test('strict UTF-8 and reserved recovery comments fail generation', async () => {
-  for (const content of [Buffer.from([0xff]), '// WHAM@1 {"type":"manifest"}\n', '// WHAM@2 begin 1: src/a.h\n']) {
+  for (const content of [Buffer.from([0xff]), '// WHAM@1 {"type":"manifest"}\n', '// WHAM@3 begin 1: src/a.h\n']) {
     const input = fixture({ 'src/mod.cpp': content }); const generated = await generateEntry(input.project, path.join(input.project.root, 'src/mod.cpp'), input.access); assert.equal(generated.bytes, undefined);
   }
 });
 test('edited synthetic code, malformed nesting and unknown versions stop recovery', async () => {
   const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n', 'src/a.h': '#pragma once\nint a;\n' });
   const source = generated.bytes.toString();
-  for (const broken of [source.replace('#define WHAM_ONCE_', '#define BAD_'), source.replace('// WHAM@2 end 1', '// WHAM@2 end 999'), source.replace('// WHAM@2 ', '// WHAM@9 '), source.replace('"version":2', '"version":9')]) assert.throws(() => restoreSource(Buffer.from(broken)));
+  for (const broken of [source.replace('#define WHAM_ONCE_', '#define BAD_'), source.replace('// WHAM@3 end 1', '// WHAM@3 end 999'), source.replace('// WHAM@3 ', '// WHAM@9 '), source.replace('"version": 3', '"version": 9')]) assert.throws(() => restoreSource(Buffer.from(broken)));
 });
 test('traversal, case collisions, and duplicate IDs are rejected', async () => {
   const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n#include "b.h"\n', 'src/a.h': 'int a;\n', 'src/b.h': 'int b;\n' });
-  for (const modified of [generated.bytes.toString().replaceAll('src/a.h', '../a.h'), generated.bytes.toString().replaceAll('src/b.h', 'src/A.h'), generated.bytes.toString().replace('"type":"include","id":2', '"type":"include","id":1')]) assert.throws(() => restoreSource(Buffer.from(modified)));
+  for (const modified of [generated.bytes.toString().replaceAll('src/a.h', '../a.h'), generated.bytes.toString().replaceAll('src/b.h', 'src/A.h'), generated.bytes.toString().replace('"id": 2', '"id": 1')]) assert.throws(() => restoreSource(Buffer.from(modified)));
 });
 test('config paths cannot overlap or escape', () => {
   for (const config of [{ sourceDirectory: '../src' }, { outputDirectory: 'src/out' }, { sourceDirectory: 'Output' }, { includeDirectories: ['/sdk'] }, { debounceMs: -1 }, { entries: ['../*.cpp'] }]) assert.throws(() => validateConfig(config));
@@ -191,4 +191,39 @@ test('recovery stops at a destination junction before writing anything', async (
     await assert.rejects(commitRestore(recovered, destination), /symlink/);
     assert.deepEqual(await fs.readdir(outside), []); await assert.rejects(fs.stat(path.join(destination, 'windhawk-amalgamation.json')), /ENOENT/);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+
+test('v3 wraps long recovery strings without changing escapes, Unicode or source bytes', async () => {
+  const directive = '#include "a.h" // ' + '\\'.repeat(800) + '😀'.repeat(400) + ' */ end\r\n';
+  const { generated, recovered } = await roundTrip({ 'src/mod.cpp': directive, 'src/a.h': '#pragma once\nint a;' },
+    { externalIncludes: ['sdk-' + '\\'.repeat(500) + '😀'.repeat(200)] });
+  const source = generated.bytes.toString(), footer = source.slice(source.indexOf('// #region WHAM recovery'));
+  assert.equal(recovered.manifest.version, 3);
+  assert.ok(footer.includes('\n//+ '));
+  for (const line of footer.split('\n')) {
+    assert.ok(line.length <= 120, `Footer line has ${line.length} characters`);
+    assert.ok(!line.endsWith('\\'), 'C++ must not splice recovery comment lines');
+    assert.ok(!line.includes('\uFFFD'), 'Wrapping must not split a Unicode surrogate pair');
+  }
+  assert.equal(recovered.files.get('src/mod.cpp')[0].bytes.toString(), directive);
+  const rootSpans = generated.spans.filter(span => span.path.endsWith('mod.cpp'));
+  assert.ok(rootSpans.every(span => span.outputEnd <= source.indexOf('// #region WHAM recovery')));
+});
+
+test('v3 rejects damaged framing, payload prefixes, continuations and mixed boundary versions', async () => {
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n', 'src/a.h': 'int a;' });
+  const source = generated.bytes.toString();
+  for (const broken of [
+    source.replace('// #region WHAM recovery\n', ''),
+    source.replace('// WHAM@3 recovery-begin\n', ''),
+    source.replace('// WHAM@3 recovery-end\n', ''),
+    source.replace('// #endregion\n', ''),
+    source.replace('// clang-format off\n', ''),
+    source.replace('// clang-format on\n', ''),
+    source.replace('// {\n', '//+ {\n'),
+    source.replace('//   "type":', '    "type":'),
+    source.replace('// WHAM@3 begin', '// WHAM@2 begin'),
+    source + 'int unexpected;\n'
+  ]) assert.throws(() => restoreSource(Buffer.from(broken)));
 });

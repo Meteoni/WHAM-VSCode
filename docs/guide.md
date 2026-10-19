@@ -52,7 +52,7 @@ Missing inputs or unsupported preprocessing produce Problems diagnostics and det
 
 Output edits are protected. **Mod Details → Compare** opens the existing output against expected saved-source output. **Recover…** recovers edits into a new or selected project after preview and conflict resolution. **Discard output edits…** requires an explicit confirmation; unsaved output buffers must first be saved or reverted. The extension writes only changed bytes and rechecks source fingerprints before committing. Deleted entries remove only unchanged outputs with previously established ownership; edited orphan outputs remain on disk.
 
-Include boundaries use short readable comments, such as `// WHAM@2 begin 1: src/includes/test.h` and `// WHAM@2 end 1`. Exact original directives and padding details are stored in the final recovery footer. Empty padding fields are omitted and directives are readable JSON strings rather than Base64. Keep boundaries, synthetic guards, and the footer intact when editing an output. WHAM 1.1 reads both v1 and v2 outputs; older WHAM versions cannot recover v2. Regenerating an unchanged v1 output upgrades its layout to v2.
+Include boundaries use short readable comments, such as `// WHAM@3 begin 1: src/includes/test.h` and `// WHAM@3 end 1`. Exact original directives and padding details are stored in a foldable recovery section at the end. Its lines stay within 120 characters, including long directives and configuration strings. Empty padding fields are omitted. Keep boundaries, synthetic guards, and the footer intact when editing an output. WHAM 1.5.12 reads v1, v2, and [v3](format-v3.md); older WHAM versions cannot recover v3. Regenerating unchanged older output upgrades it to v3.
 
 ## Project configuration
 

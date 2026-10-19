@@ -30,7 +30,7 @@ export interface RecoveryData {
   directive?: string; separatorBefore?: string; separatorAfter?: string; hash?: string;
 }
 export interface Manifest {
-  type: 'manifest'; version: 1 | 2; root: string; files: FileRecord[]; records?: RecoveryData[];
+  type: 'manifest'; version: 1 | 2 | 3; root: string; files: FileRecord[]; records?: RecoveryData[];
   config: Configuration; tail: string;
 }
 export interface RestoreCandidate { bytes: Buffer; occurrences: number[]; changed: boolean }
