@@ -26,7 +26,7 @@ New projects get `src/`, `output/`, configuration, and Git setup. Generated outp
 
 ## Recovery
 
-**Recover mods** rebuilds a source tree from one or more WHAM-generated files. Keep the `WHAM` boundary comments and recovery footer intact. Ordinary `.wh.cpp` files cannot recover their former project layout. New outputs need WHAM 1.6.0 or newer for recovery; older WHAM outputs are still supported.
+**Recover mods** rebuilds a source tree from one or more WHAM-generated files. Keep the `WHAM` boundary comments and recovery footer intact. Ordinary `.wh.cpp` files cannot recover their former project layout. New outputs need WHAM 1.7.0 or newer for recovery; older WHAM outputs are still supported.
 
 If you edit generated output, WHAM pauses regeneration so your changes aren't overwritten. Restore those edits to source or explicitly discard them before generating again.
 

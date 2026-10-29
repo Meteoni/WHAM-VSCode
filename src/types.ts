@@ -26,11 +26,11 @@ export interface GenerationResult {
 }
 export interface FileRecord { path: string; hash: string; bom: boolean }
 export interface RecoveryData {
-  type: 'include' | 'reference' | 'transform'; id: number; path?: string; kind?: string; bodyId?: number;
+  type: 'include' | 'reference' | 'fragment' | 'transform'; id: number; path?: string; kind?: string; bodyId?: number; guard?: string; lines?: number;
   directive?: string; separatorBefore?: string; separatorAfter?: string; hash?: string;
 }
 export interface Manifest {
-  type: 'manifest'; version: 1 | 2 | 3 | 4; root: string; files: FileRecord[]; records?: RecoveryData[];
+  type: 'manifest'; version: 1 | 2 | 3 | 4 | 5; root: string; files: FileRecord[]; records?: RecoveryData[];
   config: Configuration; tail: string;
 }
 export interface RestoreCandidate { bytes: Buffer; occurrences: number[]; changed: boolean }

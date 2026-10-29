@@ -1,6 +1,6 @@
 # WHAM reversible format v4
 
-WHAM 1.6.0 generates v4 and reads v1, v2, v3, and v4. Project configuration retains `formatVersion: 1`. The wrapped JSON footer, formatting protection, 120-character footer limit, and existing include/transform recovery checks follow [v3](format-v3.md). All visible boundaries and footer delimiters use `WHAM@4`, and the manifest has `version: 4`.
+WHAM 1.6.0 introduced v4. WHAM 1.7.0 generates [v5](format-v5.md) and continues reading v1 through v4. Project configuration retains `formatVersion: 1`. The wrapped JSON footer, formatting protection, 120-character footer limit, and existing include/transform recovery checks follow [v3](format-v3.md). All visible boundaries and footer delimiters use `WHAM@4`, and the manifest has `version: 4`.
 
 ## Deduplicated includes
 

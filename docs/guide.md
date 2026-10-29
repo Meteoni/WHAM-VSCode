@@ -52,7 +52,7 @@ Missing inputs or unsupported preprocessing produce Problems diagnostics and det
 
 Output edits are protected. **Mod Details → Compare** opens the existing output against expected saved-source output. **Recover…** recovers edits into a new or selected project after preview and conflict resolution. **Discard output edits…** requires an explicit confirmation; unsaved output buffers must first be saved or reverted. The extension writes only changed bytes and rechecks source fingerprints before committing. Deleted entries remove only unchanged outputs with previously established ownership; edited orphan outputs remain on disk.
 
-Include boundaries use short readable comments, such as `// WHAM@4 begin 1: src/includes/test.h` and `// WHAM@4 end 1`. Exact original directives and padding details are stored in a foldable recovery section at the end. Its lines stay within 120 characters, including long directives and configuration strings. Empty padding fields are omitted. Keep boundaries, synthetic guards, and the footer intact when editing an output. WHAM 1.6.0 reads v1, v2, v3, and [v4](format-v4.md); older WHAM versions cannot recover v4. Regenerating unchanged older output upgrades it to v4.
+Include boundaries use short readable comments, such as `// WHAM@5 begin 1: src/includes/test.h` and `// WHAM@5 end 1`. Exact original directives and padding details are stored in a foldable recovery section at the end. Its lines stay within 120 characters, including long directives and configuration strings. Empty padding fields are omitted. Keep boundaries, synthetic guards, and the footer intact when editing an output. WHAM 1.7.0 reads v1 through [v5](format-v5.md); older WHAM versions cannot recover v5. Regenerating unchanged older output upgrades it to v5.
 
 ## Project configuration
 
@@ -101,7 +101,7 @@ Recovery recreates portable configuration selecting exactly the recovered entrie
 
 Multiple containers must share their source/output/include layout and external-include rules. Recover incompatible layouts separately. Recovered source edits are retained; unchanged generate → restore → regenerate is byte-identical. Edited repeated copies can be unified during recovery, so regeneration after edits may intentionally produce different hashes or source copies.
 
-Recovery works with WHAM format-v1 and format-v2 outputs. An ordinary third-party `.wh.cpp` has no source-boundary records and cannot reconstruct its former source tree.
+Recovery works with WHAM format-v1 through format-v5 outputs. An ordinary third-party `.wh.cpp` has no source-boundary records and cannot reconstruct its former source tree.
 
 ## CLI and development
 
@@ -121,11 +121,13 @@ node dist/cli.js verify first.wh.cpp /path/to/clang++ -std=c++23 -fsyntax-only
 
 `init` and `restore` initialize Git by default; use `--no-git` to skip it. `generate --force` explicitly discards saved output edits. `restore --overwrite` explicitly permits differing existing destination files. CLI recovery fails before writes on divergent shared-file copies; resolve those using the extension UI. Use VS Code F5 with the included launch configuration to start an Extension Development Host.
 
-See [current format specification](format-v2.md), [legacy format](format-v1.md), [validation report](validation.md), and [reference decisions](references.md). `examples/demo` contains two independent Windhawk mods sharing nested headers.
+See [current format specification](format-v5.md), [legacy format](format-v1.md), [validation report](validation.md), and [reference decisions](references.md). `examples/demo` contains two independent Windhawk mods sharing nested headers.
 
 ## Supported subset and limitations
 
 Source is strict UTF-8, optionally with BOM. Unchanged recovery preserves original bytes and mixed line endings, including absent final newlines. Include cycles, conditional/late `#pragma once`, `#include_next`, module imports, `__has_include`, macro-generated local includes without explicit external rules, and multiline comments splitting directive tokens are diagnosed. Trailing multiline include comments are supported. Local source-root escapes and symlink aliases are rejected. Expansion is capped at 64 levels, 16 MiB per input file, 10000 participating files, and a 64 MiB expansion budget.
+
+Header-guard compaction uses only locally proven macro definedness. A conventional `#ifndef NAME` / `#define NAME` block can be omitted after an earlier full copy is retained and NAME is definitely defined. Text outside the block stays in place. Unknown expressions, ordinary code that could expand macros, pragmas, and unexpanded includes discard facts; declaration-heavy headers often remain expanded. Compiler architecture macros start unknown, and no branch is selected using the machine running WHAM. Changing include order or guard behaviour in generated output requires recovering and regenerating from source.
 
 `__FILE__` and `__LINE__` observe the generated source. `#line` mapping and guard-aware cycle cutting are deferred. This is a textual include bundler, not an arbitrary compiler preprocessor or a multi-translation-unit linker. Generation does not deploy mods or run hooks. Compile delegates installation to Windhawk; WHAM does not publish to the Marketplace.
 

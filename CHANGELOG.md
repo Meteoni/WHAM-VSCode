@@ -1,5 +1,11 @@
 # Changes
 
+## 1.7.0
+
+- Compact conventional header guards only when local directives prove their bodies inactive. Unknown macros, ordinary code, external includes, and pragmas discard that proof.
+- Allow partial compaction of one guarded block while preserving repeatable text outside it. Recovery follows a complete retained copy and still reports conflicting edits.
+- Add recovery format v5; continue reading v1 through v4. New output needs WHAM 1.7.0 or newer for recovery.
+
 ## 1.6.0
 
 - Replace later copies of a leading `#pragma once` header with recoverable references when an earlier inclusion is guaranteed. Conditional cases keep full expansions.
