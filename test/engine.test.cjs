@@ -50,7 +50,7 @@ test('hand-constructed compact v2 container restores exact directive and missing
 test('compact markers keep recovery fields in the footer and reject mismatched or unused data', async () => {
   const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\r\n', 'src/a.h': 'int a;' });
   const source = generated.bytes.toString();
-  assert.ok(source.startsWith('// WHAM@3 begin 1: src/a.h\n'));
+  assert.ok(source.startsWith('// WHAM@4 begin 1: src/a.h\n'));
   const body = source.slice(0, source.indexOf('// #region WHAM recovery'));
   assert.ok(!body.includes('original') && !body.includes('before') && !body.includes('{'));
   assert.ok(source.includes('"directive": "#include \\"a.h\\"\\r\\n"'));
@@ -106,8 +106,8 @@ test('edits to root and nested header land in their original files', async () =>
   assert.ok(recovered.files.get('src/b.h')[0].bytes.toString().includes('child = 2'));
   assert.ok(!recovered.files.get('src/a.h')[0].changed); assert.ok(recovered.files.get('src/mod.cpp')[0].changed);
 });
-test('divergent repeated edits always report a conflict', async () => {
-  const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\n', 'src/a.h': '#pragma once\nint edit = 1;\n' });
+test('divergent retained conditional copies still report a conflict', async () => {
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#if FLAG\n#include "a.h"\n#endif\n#include "a.h"\n', 'src/a.h': '#pragma once\nint edit = 1;\n' });
   const edited = restoreSource(Buffer.from(generated.bytes.toString().replace('int edit = 1;', 'int edit = 2;')));
   assert.deepEqual(edited.conflicts, ['src/a.h']); assert.equal(edited.files.get('src/a.h').filter(candidate => candidate.changed).length, 1);
 });
@@ -133,14 +133,14 @@ test('angle expansion is optional and uses configured directories', async () => 
   assert.equal(recovered.files.size, 2);
 });
 test('strict UTF-8 and reserved recovery comments fail generation', async () => {
-  for (const content of [Buffer.from([0xff]), '// WHAM@1 {"type":"manifest"}\n', '// WHAM@3 begin 1: src/a.h\n']) {
+  for (const content of [Buffer.from([0xff]), '// WHAM@1 {"type":"manifest"}\n', '// WHAM@4 begin 1: src/a.h\n']) {
     const input = fixture({ 'src/mod.cpp': content }); const generated = await generateEntry(input.project, path.join(input.project.root, 'src/mod.cpp'), input.access); assert.equal(generated.bytes, undefined);
   }
 });
 test('edited synthetic code, malformed nesting and unknown versions stop recovery', async () => {
   const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n', 'src/a.h': '#pragma once\nint a;\n' });
   const source = generated.bytes.toString();
-  for (const broken of [source.replace('#define WHAM_ONCE_', '#define BAD_'), source.replace('// WHAM@3 end 1', '// WHAM@3 end 999'), source.replace('// WHAM@3 ', '// WHAM@9 '), source.replace('"version": 3', '"version": 9')]) assert.throws(() => restoreSource(Buffer.from(broken)));
+  for (const broken of [source.replace('#define WHAM_ONCE_', '#define BAD_'), source.replace('// WHAM@4 end 1', '// WHAM@4 end 999'), source.replace('// WHAM@4 ', '// WHAM@9 '), source.replace('"version": 4', '"version": 9')]) assert.throws(() => restoreSource(Buffer.from(broken)));
 });
 test('traversal, case collisions, and duplicate IDs are rejected', async () => {
   const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n#include "b.h"\n', 'src/a.h': 'int a;\n', 'src/b.h': 'int b;\n' });
@@ -194,12 +194,12 @@ test('recovery stops at a destination junction before writing anything', async (
 });
 
 
-test('v3 wraps long recovery strings without changing escapes, Unicode or source bytes', async () => {
+test('v4 wraps long recovery strings without changing escapes, Unicode or source bytes', async () => {
   const directive = '#include "a.h" // ' + '\\'.repeat(800) + '😀'.repeat(400) + ' */ end\r\n';
   const { generated, recovered } = await roundTrip({ 'src/mod.cpp': directive, 'src/a.h': '#pragma once\nint a;' },
     { externalIncludes: ['sdk-' + '\\'.repeat(500) + '😀'.repeat(200)] });
   const source = generated.bytes.toString(), footer = source.slice(source.indexOf('// #region WHAM recovery'));
-  assert.equal(recovered.manifest.version, 3);
+  assert.equal(recovered.manifest.version, 4);
   assert.ok(footer.includes('\n//+ '));
   for (const line of footer.split('\n')) {
     assert.ok(line.length <= 120, `Footer line has ${line.length} characters`);
@@ -211,19 +211,145 @@ test('v3 wraps long recovery strings without changing escapes, Unicode or source
   assert.ok(rootSpans.every(span => span.outputEnd <= source.indexOf('// #region WHAM recovery')));
 });
 
-test('v3 rejects damaged framing, payload prefixes, continuations and mixed boundary versions', async () => {
+test('v4 rejects damaged framing, payload prefixes, continuations and mixed boundary versions', async () => {
   const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n', 'src/a.h': 'int a;' });
   const source = generated.bytes.toString();
   for (const broken of [
     source.replace('// #region WHAM recovery\n', ''),
-    source.replace('// WHAM@3 recovery-begin\n', ''),
-    source.replace('// WHAM@3 recovery-end\n', ''),
+    source.replace('// WHAM@4 recovery-begin\n', ''),
+    source.replace('// WHAM@4 recovery-end\n', ''),
     source.replace('// #endregion\n', ''),
     source.replace('// clang-format off\n', ''),
     source.replace('// clang-format on\n', ''),
     source.replace('// {\n', '//+ {\n'),
     source.replace('//   "type":', '    "type":'),
-    source.replace('// WHAM@3 begin', '// WHAM@2 begin'),
+    source.replace('// WHAM@4 begin', '// WHAM@2 begin'),
     source + 'int unexpected;\n'
   ]) assert.throws(() => restoreSource(Buffer.from(broken)));
+});
+
+
+test('legacy v3 repeated headers recover exactly and upgrade to v4', async () => {
+  const legacy = restoreSource(await fs.readFile(path.join(__dirname, 'fixtures/repeated-v3.wh.cpp')));
+  assert.equal(legacy.manifest.version, 3);
+  assert.equal(legacy.files.get('src/mod.cpp')[0].bytes.toString(), '#include "shared.h"\r\n#include "shared.h"\n');
+  assert.equal(legacy.files.get('src/shared.h')[0].bytes.toString(), '#pragma once\r\nint shared = 1;');
+  assert.deepEqual(legacy.conflicts, []);
+  const { generated } = await roundTrip(Object.fromEntries([...legacy.files].map(([file, copies]) => [file, copies[0].bytes])));
+  assert.ok(generated.bytes.toString().includes('// WHAM@4 reference 5: src/shared.h -> 1'));
+});
+
+test('once references recover every include, byte formatting, BOM and edited retained body', async () => {
+  const root = '\uFEFF#include "shared.h"\r\n/* prefix */ # include "shared.h" // keep this\n#include "shared.h"';
+  const header = '\uFEFF// original\n# pragma once\r\n#define ARM64 1\nint shared = 1;';
+  const { generated, recovered } = await roundTrip({ 'src/mod.cpp': root, 'src/shared.h': header });
+  const output = generated.bytes.toString();
+  assert.equal((output.match(/int shared = 1;/g) || []).length, 1);
+  assert.equal((output.match(/WHAM@4 reference \d+:/g) || []).length, 2);
+  assert.equal(recovered.files.get('src/shared.h')[0].occurrences.length, 3);
+  assert.ok(output.includes('#define ARM64 1'));
+  const edited = restoreSource(Buffer.from(output.replace('int shared = 1;', 'int shared = 2;')));
+  assert.deepEqual(edited.conflicts, []);
+  assert.equal(edited.files.get('src/shared.h')[0].bytes.toString(), header.replace('shared = 1', 'shared = 2'));
+  assert.equal(edited.files.get('src/shared.h')[0].changed, true);
+  assert.equal(edited.files.get('src/shared.h')[0].occurrences.length, 3);
+  assert.equal(edited.files.get('src/mod.cpp')[0].bytes.toString(), root);
+});
+
+test('conditional first copies stay expanded until an unconditional inclusion establishes proof', async () => {
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#if FLAG\n#include "a.h"\n#endif\n#include "a.h"\n#if OTHER\n#include "a.h"\n#endif\n#include "a.h"\n', 'src/a.h': '#pragma once\nint shared;\n' });
+  const source = generated.bytes.toString();
+  assert.equal((source.match(/int shared;/g) || []).length, 2);
+  assert.equal((source.match(/WHAM@4 reference \d+:/g) || []).length, 2);
+  const conditionalOnly = await roundTrip({ 'src/mod.cpp': '#if FLAG\n#include "a.h"\n#else\n#include "a.h"\n#endif\n', 'src/a.h': '#pragma once\nint shared;\n' });
+  assert.ok(!conditionalOnly.generated.bytes.toString().includes('WHAM@4 reference'));
+});
+
+test('conditional ancestry propagates through nested includes and ordinary guards', async () => {
+  for (const [root, wrapper] of [
+    ['#if FLAG\n#include "wrapper.h"\n#endif\n#include "a.h"\n', '#include "a.h"\n'],
+    ['#include "wrapper.h"\n#include "a.h"\n', '#ifndef WRAPPER_H\n#define WRAPPER_H\n#include "a.h"\n#endif\n'],
+    ['#if FLAG\n#include "wrapper.h"\n#endif\n#include "a.h"\n', '#pragma once\n#include "a.h"\n']
+  ]) {
+    const { generated } = await roundTrip({ 'src/mod.cpp': root, 'src/wrapper.h': wrapper, 'src/a.h': '#pragma once\nint shared;\n' });
+    assert.equal((generated.bytes.toString().match(/int shared;/g) || []).length, 2);
+    assert.ok(!generated.bytes.toString().includes('WHAM@4 reference'));
+  }
+});
+
+test('unconditional nested includes establish proof and referenced parents preserve nested recovery', async () => {
+  for (const wrapper of ['#include "a.h"\n', '#pragma once\n#include "a.h"\n']) {
+    const { generated, recovered } = await roundTrip({ 'src/mod.cpp': '#include "wrapper.h"\n#include "wrapper.h"\n#include "a.h"\n', 'src/wrapper.h': wrapper, 'src/a.h': '#pragma once\nint shared;\n' });
+    assert.equal((generated.bytes.toString().match(/int shared;/g) || []).length, 1);
+    assert.equal(recovered.files.size, 3);
+    assert.equal(recovered.files.get('src/wrapper.h')[0].occurrences.length, 2);
+    const edited = restoreSource(Buffer.from(generated.bytes.toString().replace('int shared;', 'int edited;')));
+    assert.equal(edited.files.get('src/a.h')[0].bytes.toString(), '#pragma once\nint edited;\n');
+    assert.equal(edited.files.get('src/wrapper.h')[0].changed, false);
+  }
+});
+
+test('ordinary guard undefines, architecture defines and repeatable headers are never deduplicated', async () => {
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#include "guard.h"\n#undef GUARD_H\n#define ARM64 1\n#include "guard.h"\n#include "repeat.inc"\n#include "repeat.inc"\n', 'src/guard.h': '#ifndef GUARD_H\n#define GUARD_H\n#define VALUE ARM64\n#endif\n', 'src/repeat.inc': 'ITEM(ARM64)\n' });
+  const body = generated.bytes.toString().split('// #region WHAM recovery')[0];
+  assert.ok(!body.includes('WHAM@4 reference'));
+  assert.equal((body.match(/#define GUARD_H/g) || []).length, 2);
+  assert.equal((body.match(/#define VALUE ARM64/g) || []).length, 2);
+  assert.equal((body.match(/ITEM\(ARM64\)/g) || []).length, 2);
+});
+
+test('identical bytes in different once headers keep distinct identities', async () => {
+  const header = '#pragma once\nITEM(value)\n';
+  const { generated, recovered } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n#include "b.h"\n#include "a.h"\n#include "b.h"\n', 'src/a.h': header, 'src/b.h': header });
+  const body = generated.bytes.toString().split('// #region WHAM recovery')[0];
+  assert.equal((body.match(/ITEM\(value\)/g) || []).length, 2);
+  assert.equal((body.match(/WHAM@4 reference \d+:/g) || []).length, 2);
+  assert.equal(recovered.files.size, 3);
+});
+
+test('reference comments advance original parent source lines without creating code spans', async () => {
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\nint after;\n', 'src/a.h': '#pragma once\nint shared;\n' });
+  const output = generated.bytes.toString();
+  const span = generated.spans.find(span => output.slice(span.outputStart, span.outputEnd).includes('int after;'));
+  assert.ok(span.path.endsWith('mod.cpp'));
+  assert.equal(span.sourceLine, 2);
+  assert.equal(output.slice(span.outputStart, span.outputEnd), 'int after;\n');
+});
+
+test('deduplicated headers are still reread to catch concurrent source changes', async () => {
+  const input = fixture({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\n', 'src/a.h': '#pragma once\nint original;\n' });
+  const read = input.access.read; let reads = 0;
+  input.access.read = async file => file.endsWith('a.h') && ++reads > 1 ? Buffer.from('#pragma once\nint changed;\n') : read(file);
+  const generated = await generateEntry(input.project, path.join(input.project.root, 'src/mod.cpp'), input.access);
+  assert.equal(generated.bytes, undefined);
+  assert.match(JSON.stringify(generated.diagnostics), /Source changed during generation/);
+});
+
+test('v4 rejects dangling, cross-file, forward, chained and mismatched references', async () => {
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\n#include "a.h"\n', 'src/a.h': '#pragma once\nint shared;\n' });
+  const source = generated.bytes.toString();
+  const reference = '// WHAM@4 reference 5: src/a.h -> 1\n';
+  assert.ok(source.includes(reference));
+  for (const broken of [
+    source.replace(reference, ''),
+    source.replace(reference, reference.replace('-> 1', '-> 3')),
+    source.replace(reference, reference.replace('src/a.h', 'src/other.h')),
+    source.replace(reference, reference.replace('reference 5', 'reference 1')),
+    source.replaceAll('"bodyId": 1', '"bodyId": 99').replaceAll('-> 1', '-> 99'),
+    source.replaceAll('"bodyId": 1', '"bodyId": 5').replaceAll('-> 1', '-> 5'),
+    source.replace(reference, '').replace('// WHAM@4 begin 1:', reference + '// WHAM@4 begin 1:')
+  ]) assert.throws(() => restoreSource(Buffer.from(broken)));
+});
+
+test('hand-constructed v4 references restore both original directives', () => {
+  const root = '#include "a.h"\r\n# include "a.h"';
+  const manifest = { type: 'manifest', version: 4, root: 'src/mod.cpp', config: { ...defaults }, tail: '',
+    files: [{ path: 'src/mod.cpp', hash: checksum(root), bom: false }, { path: 'src/a.h', hash: checksum('int a;\n'), bom: false }],
+    records: [{ type: 'include', id: 1, path: 'src/a.h', directive: '#include "a.h"\r\n' },
+              { type: 'reference', id: 2, path: 'src/a.h', bodyId: 1, directive: '# include "a.h"' }] };
+  const footer = '// #region WHAM recovery\n// clang-format off\n// WHAM@4 recovery-begin\n' + JSON.stringify(manifest, null, 2).split('\n').map(line => '// ' + line).join('\n') + '\n// WHAM@4 recovery-end\n// clang-format on\n// #endregion\n';
+  const restored = restoreSource(Buffer.from('// WHAM@4 begin 1: src/a.h\nint a;\n// WHAM@4 end 1\n// WHAM@4 reference 2: src/a.h -> 1\n' + footer));
+  assert.equal(restored.files.get('src/mod.cpp')[0].bytes.toString(), root);
+  assert.deepEqual(restored.files.get('src/a.h')[0].occurrences, [1, 2]);
+  assert.deepEqual(restored.conflicts, []);
 });

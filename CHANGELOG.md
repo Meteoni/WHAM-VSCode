@@ -1,5 +1,11 @@
 # Changes
 
+## 1.6.0
+
+- Replace later copies of a leading `#pragma once` header with recoverable references when an earlier inclusion is guaranteed. Conditional cases keep full expansions.
+- Preserve ordinary header guards, architecture defines, and original include directives.
+- Add recovery format v4; continue reading v1, v2, and v3 output.
+
 ## 1.5.12
 
 - Write recovery metadata as a foldable section with lines of at most 120 characters, including long directives and configuration strings.

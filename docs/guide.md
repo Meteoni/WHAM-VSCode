@@ -52,7 +52,7 @@ Missing inputs or unsupported preprocessing produce Problems diagnostics and det
 
 Output edits are protected. **Mod Details → Compare** opens the existing output against expected saved-source output. **Recover…** recovers edits into a new or selected project after preview and conflict resolution. **Discard output edits…** requires an explicit confirmation; unsaved output buffers must first be saved or reverted. The extension writes only changed bytes and rechecks source fingerprints before committing. Deleted entries remove only unchanged outputs with previously established ownership; edited orphan outputs remain on disk.
 
-Include boundaries use short readable comments, such as `// WHAM@3 begin 1: src/includes/test.h` and `// WHAM@3 end 1`. Exact original directives and padding details are stored in a foldable recovery section at the end. Its lines stay within 120 characters, including long directives and configuration strings. Empty padding fields are omitted. Keep boundaries, synthetic guards, and the footer intact when editing an output. WHAM 1.5.12 reads v1, v2, and [v3](format-v3.md); older WHAM versions cannot recover v3. Regenerating unchanged older output upgrades it to v3.
+Include boundaries use short readable comments, such as `// WHAM@4 begin 1: src/includes/test.h` and `// WHAM@4 end 1`. Exact original directives and padding details are stored in a foldable recovery section at the end. Its lines stay within 120 characters, including long directives and configuration strings. Empty padding fields are omitted. Keep boundaries, synthetic guards, and the footer intact when editing an output. WHAM 1.6.0 reads v1, v2, v3, and [v4](format-v4.md); older WHAM versions cannot recover v4. Regenerating unchanged older output upgrades it to v4.
 
 ## Project configuration
 
@@ -73,7 +73,7 @@ Include boundaries use short readable comments, such as `// WHAM@3 begin 1: src/
 
 Entry and exclusion globs are relative to `sourceDirectory`. Other directories are relative to the project root and must use portable forward-slash paths. Quoted includes search the including file's directory first, then configured include directories in order. There is no basename search. `externalIncludes` lists exact quoted header names or complete macro expressions to preserve as external. Angle includes remain external unless local angle expansion is enabled.
 
-All branches are preserved. Missing quoted includes inside `#if 0` still require a file or explicit external rule. Ordinary guards and repeatable headers retain compiler-controlled behavior. Conventional leading, unconditional `#pragma once` becomes a reversible per-file guard; repeated copies are expanded textually.
+All branches are preserved. Missing quoted includes inside `#if 0` still require a file or explicit external rule. Ordinary guards and repeatable headers retain compiler-controlled behavior. Conventional leading, unconditional `#pragma once` becomes a reversible per-file guard. After a full expansion reached without enclosing conditionals, later includes of that same file become compact references to its body. References preserve the exact original directives for recovery. Conditional ancestry is tracked through nested includes; an uncertain earlier include does not justify deduplication. Ordinary macro guards and all existing defines remain untouched. Retained copies that differ still require recovery conflict resolution.
 
 ## Editor integration and indentation
 
@@ -152,3 +152,5 @@ The optional core DLL connection has no session or installed-state access. It su
 Fixed setup choices use button dialogs. Folder names and custom widths use text inputs; project, installation, and file lists remain searchable. Packaging rewrites relative README links and images for the GitHub main branch without changing the source README.
 
 Single-mod commands skip the mod picker. With no detected Windhawk installation, Browse opens the folder dialog directly. Editor setup has one Skip action; the indentation dialog labels its dismiss action Skip editor setup. The unsaved-source Save Relevant Files prompt remains separate.
+
+For native deduplication regression checks, run `node test/check-once-preprocessing.cjs <path-to-clang++.exe>`. This compares original and generated preprocessing and checks generated syntax for x64 and ARM64, with each conditional fixture enabled and disabled.

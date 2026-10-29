@@ -15,10 +15,11 @@ const utf8 = (bytes: Buffer): string => {
 function recoveryMarkers(source: string) {
   const comments = scanSource(source).records;
   let footer = comments.at(-1), manifest: Manifest | undefined;
-  const version = footer?.text === '// WHAM@3 recovery-end' ? 3 : footer?.text.startsWith('// WHAM@2 recovery ') ? 2 : 1;
-  if (version === 3) {
+  const wrapped = /^\/\/ WHAM@([34]) recovery-end$/.exec(footer?.text ?? '');
+  const version = wrapped ? Number(wrapped[1]) : footer?.text.startsWith('// WHAM@2 recovery ') ? 2 : 1;
+  if (version >= 3) {
     const opening = comments.at(-2), region = '// #region WHAM recovery', lines: string[] = [];
-    if (opening?.text !== '// WHAM@3 recovery-begin' || !footer) throw new Error('Missing v3 recovery opening.');
+    if (opening?.text !== `// WHAM@${version} recovery-begin` || !footer) throw new Error('Missing recovery opening.');
     const formatStart = source.lastIndexOf('\n', opening.start - 2) + 1;
     const regionStart = source.lastIndexOf('\n', formatStart - 2) + 1;
     if (source.slice(regionStart, opening.start).replace(/\r\n/g, '\n') !== region + '\n// clang-format off\n') throw new Error('Missing recovery folding region.');
@@ -27,7 +28,7 @@ function recoveryMarkers(source: string) {
     for (const line of source.slice(opening.end, footer.start).replace(/\r?\n$/, '').split(/\r?\n/)) {
       if (line.startsWith('//+ ') && lines.length) lines[lines.length - 1] += line.slice(4);
       else if (line.startsWith('// ')) lines.push(line.slice(3));
-      else throw new Error('Malformed v3 recovery comment.');
+      else throw new Error('Malformed recovery comment.');
     }
     manifest = JSON.parse(lines.join('\n')) as Manifest;
     footer = { start: regionStart, end: source.length, text: footer.text };
@@ -38,10 +39,15 @@ function recoveryMarkers(source: string) {
   if (manifest) {
     if (manifest.type !== 'manifest' || manifest.version !== version || !Array.isArray(manifest.records)) throw new Error('Malformed recovery data.');
     for (const record of manifest.records) {
-      if (!record || !['include', 'transform'].includes(record.type) || !Number.isSafeInteger(record.id) || record.id < 1 || data.has(record.id)) throw new Error('Invalid or duplicate recovery data ID.');
+      if (!record || !['include', 'transform', ...(version === 4 ? ['reference'] : [])].includes(record.type) || !Number.isSafeInteger(record.id) || record.id < 1 || data.has(record.id)) throw new Error('Invalid or duplicate recovery data ID.');
       if (record.directive !== undefined && typeof record.directive !== 'string') throw new Error('Invalid original directive.');
+      if (record.type === 'reference' && (!Number.isSafeInteger(record.bodyId) || record.bodyId! < 1 || !record.directive)) throw new Error('Invalid recovery reference.');
       data.set(record.id, record);
     }
+  }
+  for (const record of data.values()) if (record.type === 'reference') {
+    const target = data.get(record.bodyId!);
+    if (!target || target.type !== 'include' || target.path !== record.path) throw new Error('Recovery reference has no matching body.');
   }
   const records = comments.map(comment => {
     if (comment.start !== 0 && !(comment.start === 1 && source[0] === '\uFEFF') && source[comment.start - 1] !== '\n') throw new Error('Recovery marker is not on a separate line.');
@@ -51,12 +57,12 @@ function recoveryMarkers(source: string) {
       value = JSON.parse(comment.text.slice('// WHAM@1 '.length));
     } else if (comment === footer) value = manifest;
     else {
-      const opening = /^\/\/ WHAM@([23]) (begin|transform) ([1-9]\d*): (.+)$/.exec(comment.text);
-      const closing = /^\/\/ WHAM@([23]) (end|end-transform) ([1-9]\d*)$/.exec(comment.text);
+      const opening = /^\/\/ WHAM@([234]) (begin|transform|reference) ([1-9]\d*): (.+)$/.exec(comment.text);
+      const closing = /^\/\/ WHAM@([234]) (end|end-transform) ([1-9]\d*)$/.exec(comment.text);
       if (Number((opening ?? closing)?.[1]) !== version) throw new Error('Boundary format does not match manifest.');
       if (opening) {
-        const id = Number(opening[3]), item = data.get(id), type = opening[2] === 'begin' ? 'include' : 'transform';
-        if (!item || item.type !== type || used.has(id) || opening[4] !== (type === 'include' ? item.path : item.kind)) throw new Error('Boundary does not match recovery data.');
+        const id = Number(opening[3]), item = data.get(id), type = opening[2] === 'begin' ? 'include' : opening[2] === 'reference' ? 'reference' : 'transform';
+        if (!item || item.type !== type || used.has(id) || opening[4] !== (type === 'include' ? item.path : type === 'reference' ? `${item.path} -> ${item.bodyId}` : item.kind)) throw new Error('Boundary does not match recovery data.');
         used.add(id);
         value = { ...item, original: Buffer.from(item.directive ?? '', 'utf8').toString('base64'), before: item.separatorBefore ?? '', tail: item.separatorAfter ?? '' };
       } else if (closing) value = { type: closing[2] === 'end' ? 'include-end' : 'transform-end', id: Number(closing[3]) };
@@ -76,16 +82,19 @@ export async function generateEntry(project: Project, entryPath: string, files: 
   const manifestFiles = new Map<string, { path: string; hash: string; bom: boolean }>();
   const identities = new Map<string, string>();
   const recoveryData: RecoveryData[] = [];
-  const marker = (record: { type: string; id: number; path?: string; kind?: string; original?: string; before?: string; tail?: string; hash?: string }): string => {
-    if (record.type === 'include' || record.type === 'transform') {
+  // Only full expansions reached without any enclosing conditional establish this proof.
+  const guaranteedOnce = new Map<string, number>();
+  const marker = (record: { type: string; id: number; path?: string; kind?: string; original?: string; before?: string; tail?: string; hash?: string; bodyId?: number }): string => {
+    if (record.type === 'include' || record.type === 'transform' || record.type === 'reference') {
       recoveryData.push({ type: record.type, id: record.id,
         ...(record.path !== undefined ? { path: record.path } : {}), ...(record.kind !== undefined ? { kind: record.kind } : {}),
         ...(record.original ? { directive: record.original } : {}),
         ...(record.before ? { separatorBefore: record.before } : {}), ...(record.tail ? { separatorAfter: record.tail } : {}),
-        ...(record.hash !== undefined ? { hash: record.hash } : {}) });
-      return `// WHAM@3 ${record.type === 'include' ? 'begin' : 'transform'} ${record.id}: ${record.path ?? record.kind}\n`;
+        ...(record.hash !== undefined ? { hash: record.hash } : {}),
+        ...(record.bodyId !== undefined ? { bodyId: record.bodyId } : {}) });
+      return `// WHAM@4 ${record.type === 'include' ? 'begin' : record.type === 'reference' ? 'reference' : 'transform'} ${record.id}: ${record.path ?? record.kind}${record.type === 'reference' ? ` -> ${record.bodyId}` : ''}\n`;
     }
-    return `// WHAM@3 ${record.type === 'include-end' ? 'end' : 'end-transform'} ${record.id}\n`;
+    return `// WHAM@4 ${record.type === 'include-end' ? 'end' : 'end-transform'} ${record.id}\n`;
   };
   const sourceRoot = path.resolve(project.root, project.config.sourceDirectory);
   let nextId = 1, generatedSize = 0;
@@ -93,7 +102,7 @@ export async function generateEntry(project: Project, entryPath: string, files: 
   try {
     validateConfig(project.config);
     const canonicalRoot = await files.identity(sourceRoot);
-    const expand = async (file: string, stack: string[]): Promise<string> => {
+    const expand = async (file: string, stack: string[], unconditional: boolean, occurrenceId: number): Promise<{ body: string; reference?: number }> => {
       if (stack.length >= 64) throw new Error('Expansion exceeds 64 levels. Reduce recursive include depth.');
       if (!contained(sourceRoot, file)) throw new Error(`Local include escapes source root: ${file}`);
       const canonical = await files.identity(file);
@@ -112,6 +121,8 @@ export async function generateEntry(project: Project, entryPath: string, files: 
       const decoded = utf8(bytes), bom = decoded.startsWith('\uFEFF');
       manifestFiles.set(display, { path: display, hash, bom });
       if (manifestFiles.size > 10000) throw new Error('More than 10000 source files participate in one entry.');
+      const retainedBody = guaranteedOnce.get(canonical);
+      if (retainedBody !== undefined) return { body: '', reference: retainedBody };
       const source = bom ? decoded.slice(1) : decoded;
       const scan = scanSource(source);
       if (scan.records.length) throw new Error(`Reserved WHAM recovery comment in ${display}`);
@@ -158,12 +169,14 @@ export async function generateEntry(project: Project, entryPath: string, files: 
         }
         if (!contained(sourceRoot, target)) { report(file, line, `Include "${includeName}" resolves outside the supported source root.`); continue; }
         const id = nextId++, before = start > 0 && source[start - 1] !== '\n' ? '\n' : '';
-        let child: string;
-        try { child = await expand(target, [...stack, canonical]); }
+        let child: { body: string; reference?: number };
+        try { child = await expand(target, [...stack, canonical], unconditional && conditionDepth === 0, id); }
         catch (error) { report(file, line, (error as Error).message); continue; }
-        const tail = child && !child.endsWith('\n') ? '\n' : '';
+        const tail = child.body && !child.body.endsWith('\n') ? '\n' : '';
         const childPath = path.relative(project.root, target).split(path.sep).join('/');
-        const expansion = before + marker({ type: 'include', id, path: childPath, original: source.slice(start, end), before, tail }) + child + tail + marker({ type: 'include-end', id });
+        const expansion = child.reference !== undefined
+          ? before + marker({ type: 'reference', id, path: childPath, original: source.slice(start, end), before, bodyId: child.reference })
+          : before + marker({ type: 'include', id, path: childPath, original: source.slice(start, end), before, tail }) + child.body + tail + marker({ type: 'include-end', id });
         output += source.slice(cursor, start) + expansion;
         cursor = end;
       }
@@ -178,15 +191,16 @@ export async function generateEntry(project: Project, entryPath: string, files: 
       }
       generatedSize += Buffer.byteLength(output);
       if (generatedSize > 64 * 1024 * 1024) throw new Error('Expanded output exceeds 64 MiB. Reduce repeated includes.');
-      return stack.length === 0 && bom ? '\uFEFF' + output : output;
+      if (once && unconditional && occurrenceId > 0) guaranteedOnce.set(canonical, occurrenceId);
+      return { body: stack.length === 0 && bom ? '\uFEFF' + output : output };
     };
-    const body = await expand(path.resolve(entryPath), []);
+    const { body } = await expand(path.resolve(entryPath), [], true, 0);
     if (result.diagnostics.some(item => item.severity === 'error')) return result;
     const root = path.relative(project.root, entryPath).split(path.sep).join('/');
     const rootRelative = path.posix.relative(project.config.sourceDirectory, root);
     const config = { ...project.config, entries: [rootRelative.replace(/([*?\[\]{}()!+@])/g, '[$1]')], exclude: [] };
     const tail = body && !body.endsWith('\n') ? '\n' : '';
-    const manifest: Manifest = { type: 'manifest', version: 3, root, files: [...manifestFiles.values()].sort((a, b) => a.path.localeCompare(b.path)), config, tail,
+    const manifest: Manifest = { type: 'manifest', version: 4, root, files: [...manifestFiles.values()].sort((a, b) => a.path.localeCompare(b.path)), config, tail,
       records: recoveryData.sort((left, right) => left.id - right.id) };
     // Escape literal backslashes so even a long run can be wrapped without a
     // trailing backslash splicing two C++ comment lines. Recovery rejoins //+ lines.
@@ -200,8 +214,8 @@ export async function generateEntry(project: Project, entryPath: string, files: 
         start = end;
       }
     }
-    const container = body + tail + '// #region WHAM recovery\n// clang-format off\n// WHAM@3 recovery-begin\n' + footerLines.join('\n') +
-      '\n// WHAM@3 recovery-end\n// clang-format on\n// #endregion\n';
+    const container = body + tail + '// #region WHAM recovery\n// clang-format off\n// WHAM@4 recovery-begin\n' + footerLines.join('\n') +
+      '\n// WHAM@4 recovery-end\n// clang-format on\n// #endregion\n';
     if (Buffer.byteLength(container) > 64 * 1024 * 1024) throw new Error('Recovery container exceeds 64 MiB.');
     result.bytes = Buffer.from(container);
     // Recompute spans against the final container so nested includes and guards
@@ -225,6 +239,8 @@ export async function generateEntry(project: Project, entryPath: string, files: 
       else if (record.type === 'include-end') {
         regions.pop();
         regions.at(-1)!.sourceLine += region.directiveLines;
+      } else if (record.type === 'reference') {
+        region.sourceLine += Buffer.from(record.original, 'base64').toString().split('\n').length - 1;
       } else if (record.type === 'transform') {
         region.sourceLine += Buffer.from(record.original, 'base64').toString().split('\n').length - 1;
         spanCursor = recoveryRecords[++index].end; continue;
@@ -242,7 +258,7 @@ export function restoreSource(bytes: Buffer): RestoreResult {
   const footer = records.at(-1);
   if (!footer || footer.value.type !== 'manifest' || footer.end !== source.length) throw new Error('Missing or misplaced WHAM footer manifest.');
   const manifest = footer.value as Manifest;
-  if (![1, 2, 3].includes(manifest.version) || !Array.isArray(manifest.files) || manifest.files.length > 10000) throw new Error('Unsupported or malformed manifest.');
+  if (![1, 2, 3, 4].includes(manifest.version) || !Array.isArray(manifest.files) || manifest.files.length > 10000) throw new Error('Unsupported or malformed manifest.');
   portablePath(manifest.root); validateConfig(manifest.config);
   if (manifest.tail !== '' && manifest.tail !== '\n') throw new Error('Invalid root padding.');
   const fileRecords = new Map<string, Manifest['files'][number]>(), cases = new Set<string>();
@@ -254,6 +270,7 @@ export function restoreSource(bytes: Buffer): RestoreResult {
   }
   if (!fileRecords.has(manifest.root)) throw new Error('Manifest omits the root file.');
   const files = new Map<string, RestoreCandidate[]>(), ids = new Set<number>();
+  const retainedBodies = new Map<number, { path: string; bytes: Buffer }>();
   const original = (value: unknown): string => {
     if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new Error('Invalid original directive encoding.');
     return utf8(Buffer.from(value, 'base64'));
@@ -268,6 +285,7 @@ export function restoreSource(bytes: Buffer): RestoreResult {
     if (same) same.occurrences.push(id);
     else candidates.push({ bytes: restored, occurrences: [id], changed: checksum(restored) !== record.hash });
     files.set(file, candidates);
+    return restored;
   };
   let recordIndex = 0;
   const parseRegion = (start: number, expectedId?: number, depth = 0): { body: string; end: number } => {
@@ -280,7 +298,7 @@ export function restoreSource(bytes: Buffer): RestoreResult {
         if (value.id !== expectedId) throw new Error('Malformed include nesting.');
         return { body, end: record.end };
       }
-      if (!['include', 'transform'].includes(value.type) || !Number.isSafeInteger(value.id) || value.id < 1 || ids.has(value.id)) throw new Error('Unexpected record or duplicate occurrence ID.');
+      if (!['include', 'reference', 'transform'].includes(value.type) || !Number.isSafeInteger(value.id) || value.id < 1 || ids.has(value.id)) throw new Error('Unexpected record or duplicate occurrence ID.');
       ids.add(value.id);
       if (value.before !== '' && value.before !== '\n') throw new Error('Invalid separator.');
       if (value.before && !body.endsWith(value.before)) throw new Error('Edited generated separator.');
@@ -290,8 +308,15 @@ export function restoreSource(bytes: Buffer): RestoreResult {
         if (value.tail !== '' && value.tail !== '\n') throw new Error('Invalid child padding.');
         const child = parseRegion(record.end, value.id, depth + 1);
         if (value.tail && !child.body.endsWith(value.tail)) throw new Error('Edited child separator.');
-        add(value.path, value.tail ? child.body.slice(0, -value.tail.length) : child.body, value.id);
+        const restored = add(value.path, value.tail ? child.body.slice(0, -value.tail.length) : child.body, value.id);
+        retainedBodies.set(value.id, { path: value.path, bytes: restored });
         body += original(value.original); cursor = child.end;
+      } else if (value.type === 'reference') {
+        const target = retainedBodies.get(value.bodyId);
+        if (manifest.version !== 4 || !target || target.path !== value.path) throw new Error('Recovery reference must name an earlier completed body of the same file.');
+        const candidate = files.get(value.path)!.find(candidate => candidate.bytes.equals(target.bytes))!;
+        candidate.occurrences.push(value.id);
+        body += original(value.original); cursor = record.end;
       } else {
         const close = records[recordIndex++];
         if (!close || close.value.type !== 'transform-end' || close.value.id !== value.id || !['pragma-once', 'guard-open', 'guard-close'].includes(value.kind)) throw new Error('Malformed transform nesting.');

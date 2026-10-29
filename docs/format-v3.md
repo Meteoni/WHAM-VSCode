@@ -1,6 +1,6 @@
 # WHAM reversible format v3
 
-WHAM 1.5.12 generates v3 and continues to read v1 and v2. The project configuration still uses `formatVersion: 1`. Recovery data has the same meaning as [v2](format-v2.md); v3 changes its presentation to avoid overly long lines in Windhawk.
+WHAM 1.5.12 introduced v3. WHAM 1.6.0 generates [v4](format-v4.md) and continues to read v1, v2, and v3. The project configuration still uses `formatVersion: 1`. Recovery data has the same meaning as [v2](format-v2.md); v3 changes its presentation to avoid overly long lines in Windhawk.
 
 Source boundaries use `WHAM@3` with the same IDs, paths and transform kinds as v2. The output ends with:
 

@@ -1,6 +1,6 @@
 # WHAM reversible format v2
 
-WHAM 1.1 introduced v2. WHAM 1.5.12 generates [v3](format-v3.md) and continues to read v1 and v2. Project configuration retains its separate `formatVersion: 1`. Output v2 moves recovery payloads out of source boundaries into the final footer.
+WHAM 1.1 introduced v2. WHAM 1.6.0 generates [v4](format-v4.md) and continues to read v1, v2, and v3. Project configuration retains its separate `formatVersion: 1`. Output v2 moves recovery payloads out of source boundaries into the final footer.
 
 ```cpp
 // WHAM@2 begin 1: src/includes/test.h
