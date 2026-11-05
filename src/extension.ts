@@ -870,6 +870,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   register('generateCurrent', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state, true); if (entry && await saveRelevant(state)) await enqueue(state, [entry.path]); });
   register('compare', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state); if (entry) await compare(state, entry); });
   register('verify', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state); if (entry) await verify(state, entry); });
+  register('compile', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state); if (entry) await compileMod(state, entry); });
   register('toggleOnSave', async () => { const state = active(); if (state) await updateConfig(state, { ...state.project.config, generate: state.project.config.generate === 'onSave' ? 'manual' : 'onSave' }); });
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('windhawk.projects', {
     resolveWebviewView(webviewView) {
