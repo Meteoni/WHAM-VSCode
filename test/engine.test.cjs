@@ -62,14 +62,6 @@ test('nested source preserves Windhawk metadata and explicit included cpp', asyn
   const result = await roundTrip({ 'src/mod.cpp': metadata + '#include "a.hpp"\n#include "impl.cpp"\n', 'src/a.hpp': '#include "nested/b.h"\n', 'src/nested/b.h': 'const int answer = 42;\n', 'src/impl.cpp': 'void run() {}\n', 'src/unused.h': 'unused' });
   assert.ok(result.generated.bytes.toString().startsWith(metadata)); assert.equal(result.recovered.files.size, 4);
 });
-test('once headers are repeated in inactive branches and restored verbatim', async () => {
-  const { generated } = await roundTrip({ 'src/mod.cpp': '#if FLAG\n#include "a.h"\n#endif\n#include "a.h"\n', 'src/a.h': '// hello\n# pragma once\nint shared = 1;\n' });
-  assert.equal((generated.bytes.toString().match(/int shared = 1;/g) || []).length, 2);
-  assert.equal((generated.bytes.toString().match(/#ifndef WHAM_ONCE_/g) || []).length, 2);
-});
-test('traditional guards and X-macro headers preserve repeat semantics', async () => {
-  await roundTrip({ 'src/mod.cpp': '#include "guard.h"\n#include "repeat.inc"\n#include "repeat.inc"\n', 'src/guard.h': '#ifndef GUARD\n#define GUARD\nint x;\n#endif\n', 'src/repeat.inc': 'ITEM(one)\nITEM(two)\n' });
-});
 test('lexical context, continuations, comments before directives, and raw markers', async () => {
   const source = 'const char* s = R"tag(\n#include "fake.h"\n// WHAM@1 {"type":"fake"}\n)tag";\nconst char* q = "#include \\\"fake.h\\\"";\n/* prefix */ # include \\\n "real.h" // trailing\n/* spanning\n*/#include "real.h"\n';
   const { generated } = await roundTrip({ 'src/mod.cpp': source, 'src/real.h': '/* #include "fake.h" */\n' });
@@ -163,12 +155,24 @@ test('recovery refuses conflicts and overwrite before creating files', async () 
   assert.equal(await fs.readFile(path.join(destination, 'src/a.h'), 'utf8'), 'preserve me');
   await fs.rm(destination, { recursive: true, force: true });
 });
-test('source changes during repeated expansion are diagnosed', async () => {
-  const input = fixture({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\n', 'src/a.h': 'int a;' });
-  const read = input.access.read; let reads = 0;
-  input.access.read = async file => { const bytes = await read(file); return file.endsWith('a.h') && ++reads > 1 ? Buffer.from('int b;') : bytes; };
-  const generated = await generateEntry(input.project, path.join(input.project.root, 'src/mod.cpp'), input.access);
-  assert.equal(generated.bytes, undefined); assert.match(generated.diagnostics.map(item => item.message).join(), /changed during/);
+test('source changes are rejected for plain, once, and guarded headers', async () => {
+  for (const [name, header] of [
+    ['plain', 'int original;\n'],
+    ['once', '#pragma once\nint original;\n'],
+    ['guarded', '#ifndef A_H\n#define A_H\n#define VALUE 42\n#endif\n']
+  ]) {
+    const input = fixture({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\n', 'src/a.h': header });
+    let reads = 0;
+    const access = { ...input.access, read: async file => {
+      const bytes = await input.access.read(file);
+      return file.endsWith('a.h') && ++reads > 1 ? Buffer.concat([bytes, Buffer.from('// changed during generation\n')]) : bytes;
+    }};
+    const generated = await generateEntry(input.project, path.join(input.project.root, 'src/mod.cpp'), access);
+    assert.equal(reads, 2, name);
+    assert.equal(generated.bytes, undefined, name);
+    assert.match(JSON.stringify(generated.diagnostics), /Source changed during generation/, name);
+    assert.ok(generated.dependencies.has(path.join(input.project.root, 'src/a.h')), name);
+  }
 });
 test('source symlink escapes and ambiguous canonical aliases are rejected', async () => {
   const input = fixture({ 'src/mod.cpp': '#include "a.h"\n', 'src/a.h': 'int a;' });
@@ -192,7 +196,6 @@ test('recovery stops at a destination junction before writing anything', async (
     assert.deepEqual(await fs.readdir(outside), []); await assert.rejects(fs.stat(path.join(destination, 'windhawk-amalgamation.json')), /ENOENT/);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
-
 
 test('v5 wraps long recovery strings without changing escapes, Unicode or source bytes', async () => {
   const directive = '#include "a.h" // ' + '\\'.repeat(800) + '😀'.repeat(400) + ' */ end\r\n';
@@ -228,7 +231,6 @@ test('v5 rejects damaged framing, payload prefixes, continuations and mixed boun
   ]) assert.throws(() => restoreSource(Buffer.from(broken)));
 });
 
-
 test('legacy v3 repeated headers recover exactly and upgrade to v5', async () => {
   const legacy = restoreSource(await fs.readFile(path.join(__dirname, 'fixtures/repeated-v3.wh.cpp')));
   assert.equal(legacy.manifest.version, 3);
@@ -257,9 +259,10 @@ test('once references recover every include, byte formatting, BOM and edited ret
 });
 
 test('conditional first copies stay expanded until an unconditional inclusion establishes proof', async () => {
-  const { generated } = await roundTrip({ 'src/mod.cpp': '#if FLAG\n#include "a.h"\n#endif\n#include "a.h"\n#if OTHER\n#include "a.h"\n#endif\n#include "a.h"\n', 'src/a.h': '#pragma once\nint shared;\n' });
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#if FLAG\n#include "a.h"\n#endif\n#include "a.h"\n#if OTHER\n#include "a.h"\n#endif\n#include "a.h"\n', 'src/a.h': '// hello\n# pragma once\nint shared;\n' });
   const source = generated.bytes.toString();
   assert.equal((source.match(/int shared;/g) || []).length, 2);
+  assert.equal((source.match(/#ifndef WHAM_ONCE_/g) || []).length, 2);
   assert.equal((source.match(/WHAM@5 reference \d+:/g) || []).length, 2);
   const conditionalOnly = await roundTrip({ 'src/mod.cpp': '#if FLAG\n#include "a.h"\n#else\n#include "a.h"\n#endif\n', 'src/a.h': '#pragma once\nint shared;\n' });
   assert.ok(!conditionalOnly.generated.bytes.toString().includes('WHAM@5 reference'));
@@ -289,12 +292,14 @@ test('unconditional nested includes establish proof and referenced parents prese
   }
 });
 
-test('ordinary guard undefines, architecture defines and repeatable headers are never deduplicated', async () => {
-  const { generated } = await roundTrip({ 'src/mod.cpp': '#include "guard.h"\n#undef GUARD_H\n#define ARM64 1\n#include "guard.h"\n#include "repeat.inc"\n#include "repeat.inc"\n', 'src/guard.h': '#ifndef GUARD_H\n#define GUARD_H\n#define VALUE ARM64\n#endif\n', 'src/repeat.inc': 'ITEM(ARM64)\n' });
+test('guard undefines and repeatable headers retain every expansion', async () => {
+  const { generated } = await roundTrip({ 'src/mod.cpp': '#include "guard.h"\n#undef GUARD_H\n#define ARM64 1\n#include "guard.h"\n#include "repeat.inc"\n#include "repeat.inc"\n', 'src/guard.h': '#ifndef GUARD_H\n#define GUARD_H\n#define VALUE ARM64\n#endif\n', 'src/repeat.inc': 'ITEM(one)\nITEM(two)\nITEM(ARM64)\n' });
   const body = generated.bytes.toString().split('// #region WHAM recovery')[0];
   assert.ok(!body.includes('WHAM@5 reference'));
   assert.equal((body.match(/#define GUARD_H/g) || []).length, 2);
   assert.equal((body.match(/#define VALUE ARM64/g) || []).length, 2);
+  assert.equal((body.match(/ITEM\(one\)/g) || []).length, 2);
+  assert.equal((body.match(/ITEM\(two\)/g) || []).length, 2);
   assert.equal((body.match(/ITEM\(ARM64\)/g) || []).length, 2);
 });
 
@@ -314,15 +319,6 @@ test('reference comments advance original parent source lines without creating c
   assert.ok(span.path.endsWith('mod.cpp'));
   assert.equal(span.sourceLine, 2);
   assert.equal(output.slice(span.outputStart, span.outputEnd), 'int after;\n');
-});
-
-test('deduplicated headers are still reread to catch concurrent source changes', async () => {
-  const input = fixture({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\n', 'src/a.h': '#pragma once\nint original;\n' });
-  const read = input.access.read; let reads = 0;
-  input.access.read = async file => file.endsWith('a.h') && ++reads > 1 ? Buffer.from('#pragma once\nint changed;\n') : read(file);
-  const generated = await generateEntry(input.project, path.join(input.project.root, 'src/mod.cpp'), input.access);
-  assert.equal(generated.bytes, undefined);
-  assert.match(JSON.stringify(generated.diagnostics), /Source changed during generation/);
 });
 
 test('v5 rejects dangling, cross-file, forward, chained and mismatched references', async () => {
@@ -353,7 +349,6 @@ test('hand-constructed v4 references restore both original directives', () => {
   assert.deepEqual(restored.files.get('src/a.h')[0].occurrences, [1, 2]);
   assert.deepEqual(restored.conflicts, []);
 });
-
 
 test('frozen v4 output remains recoverable and regenerates as v5', async () => {
   const previous = restoreSource(await fs.readFile(path.join(__dirname, 'fixtures/repeated-v4.wh.cpp')));
@@ -487,19 +482,6 @@ test('fragment recovery rejects forged targets and changed or ambiguous guard bo
     source.replace('#define VALUE 42', '#define VALUE 42\n#endif\n#ifndef B_H\n#define B_H')
   ]) assert.throws(() => restoreSource(Buffer.from(damaged)));
 });
-
-test('guard compaction still detects concurrent source changes and keeps dependencies', async () => {
-  const input = fixture({ 'src/mod.cpp': '#include "a.h"\n#include "a.h"\n', 'src/a.h': '#ifndef A_H\n#define A_H\n#define VALUE 42\n#endif\n' });
-  let reads = 0;
-  const access = { ...input.access, read: async file => {
-    const bytes = await input.access.read(file);
-    return file.endsWith('a.h') && ++reads > 1 ? Buffer.from(bytes.toString().replace('42','43')) : bytes;
-  }};
-  const generated = await generateEntry(input.project, path.join(input.project.root, 'src/mod.cpp'), access);
-  assert.ok(!generated.bytes);
-  assert.ok(generated.diagnostics.some(item => item.message.includes('changed during generation')));
-});
-
 
 test('conditional pragma-once execution cannot manufacture an ordinary guard proof', async () => {
   for (const suffix of ['', '#undef MODE\n#define MODE 1\n']) {
