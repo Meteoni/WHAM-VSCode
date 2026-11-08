@@ -2,7 +2,7 @@
   "name": "windhawk-amalgamation",
   "displayName": "WHAM: Windhawk Source Amalgamation",
   "description": "Build standalone Windhawk mods and recover their editable source trees, with per-project sidebar controls.",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "publisher": "Meteoni",
   "license": "MIT AND GPL-3.0-only",
   "engines": {
@@ -131,7 +131,7 @@
       },
       {
         "command": "windhawk.compile",
-        "title": "WHAM: Compile and Install Generated Mod with Compiler"
+        "title": "WHAM: Compile and Install Mod"
       },
       {
         "command": "windhawk.logs",

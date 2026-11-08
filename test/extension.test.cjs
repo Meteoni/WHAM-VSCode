@@ -88,7 +88,8 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     };
     const project = () => messages.filter(message => message.type === 'state').at(-1)?.projects[0];
     await settle(() => project()?.entries.every(entry => entry.status === 'current'));
-    assert.equal(commands.size, 10); assert.equal(project().entries.length, 2);
+    const contributed = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8')).contributes.commands.map(command => command.command);
+    assert.deepEqual([...commands.keys()].sort(), contributed.sort()); assert.equal(project().entries.length, 2);
     assert.equal(project().editor.installationPath, path.join(root, 'installation')); assert.equal(project().editor.indentSize, 2); assert.equal(project().editor.indentStyle, 'tabs');
     await settle(()=>project().editorNeedsApply===true);
     // Local preference saves never write generation, formatting, or editor files.

@@ -136,9 +136,13 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
   const current = () => messages.filter(message => message.type==='state').at(-1)?.projects[0]?.entries[0];
   const until = async predicate => { for (let attempt=0;attempt<300;attempt++) { if(await predicate()) return; await new Promise(resolve=>setTimeout(resolve,10)); } assert.fail('Runtime state did not settle: '+JSON.stringify(current())); };
   try {
-    await extension.activate(context); contextView();
-    await until(()=>messages.filter(message=>message.type==='state').at(-1)?.projects[0]?.windhawk?.cli);
-    assert.equal(current().runtime.installed,false);
+    await extension.activate(context);
+    await commands.get('windhawk.compile')();
+    assert.equal(calls.length,1,'Palette compilation works immediately after activation without opening the sidebar');
+    assert.equal(sidebarView,undefined);
+    assert.ok(!notices.some(message=>message.includes('Select your Windhawk installation')));
+    contextView();
+    assert.equal(current().runtime.installed,true);
     const readsBeforeOpening = coreReads;
     await receive({ action:'details', root, entry });
     assert.equal(sidebarView.webview.html, 'Immediate details shell');
@@ -159,7 +163,6 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     const noticesBeforeLateMessage = notices.length;
     await receive({ action:'modAction', modAction:'open', details:true });
     assert.equal(notices.length, noticesBeforeLateMessage, 'Late preview messages are ignored after returning');
-    await receive({ action:'compile', root, entry });
     assert.equal(calls[0].args[1], 'install'); assert.ok(calls[0].args.includes('--disabled')); assert.ok(calls[0].input.includes('int shared = 1'));
     assert.equal(current().runtime.enabled,false); assert.equal(current().runtime.changesPending,false);
     await receive({action:'compile',root,entry});assert.ok(calls.at(-1).args.includes('--disabled'),'Disabled recompilation stays explicitly disabled');
@@ -221,6 +224,65 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     await receive({ action: 'openProject', browse: true });
     const peer = () => messages.filter(message => message.type === 'state').at(-1)?.projects.find(project => project.root === peerRoot)?.entries[0];
     await until(() => peer()?.runtime.installed);
+    // Palette compilation retains the selected project, but an unrelated editor
+    // must not silently install that project's mod.
+    {
+      const warnings = [];
+      mock.window.activeTextEditor = { document: { uri: Uri.file(entry) } };
+      mock.window.showWarningMessage = async (message,options,...buttons) => { warnings.push({message,options,buttons}); return undefined; };
+      const beforeCancel = calls.length;
+      await commands.get('windhawk.compile')();
+      assert.equal(calls.length,beforeCancel,'Canceling a cross-project confirmation never installs');
+      assert.equal(warnings.length,1);
+      assert.ok(warnings[0].message.includes(path.basename(root)) && warnings[0].message.includes('peer-project'));
+      assert.ok(warnings[0].message.includes('Runtime test'));
+      assert.equal(warnings[0].options.modal,true);
+      assert.equal(warnings[0].options.detail,'Source: '+peerEntry);
+      assert.deepEqual(warnings[0].buttons,['Compile Runtime test']);
+      mock.window.showWarningMessage = async (message,options,...buttons) => buttons[0];
+      await commands.get('windhawk.compile')();
+      assert.equal(calls.length,beforeCancel+1,'Explicit confirmation installs the selected project');
+      assert.ok(!calls.at(-1).input.includes('src/header.h'),'The confirmed peer source is installed, rather than the focused project');
+
+      await receive({ action:'select', root });
+      mock.window.showWarningMessage = async () => { throw Error('Unexpected confirmation for a related file'); };
+      for (const related of [entry,header,path.join(root,'output/mod.wh.cpp')]) {
+        mock.window.activeTextEditor = { document: { uri: Uri.file(related) } };
+        const beforeRelated = calls.length;
+        await commands.get('windhawk.compile')();
+        assert.equal(calls.length,beforeRelated+1,'Related entry, header, and output compile without confirmation: '+related);
+      }
+
+      const otherEntry = path.join(root,'src/z-other.cpp'), privateHeader = path.join(root,'src/z-private.h');
+      await fs.writeFile(privateHeader,'int private_value = 1;\n');
+      await fs.writeFile(otherEntry,original.replace('@name Runtime test','@name Other mod').replace('#include "header.h"','#include "header.h"\n#include "z-private.h"'));
+      watchers[0].create(Uri.file(otherEntry));
+      await until(() => messages.filter(message=>message.type==='state').at(-1)?.projects[0]?.entries.find(candidate=>candidate.path===otherEntry)?.dependencies===3);
+      let picks = 0;
+      mock.window.showQuickPick = async choices => { picks++; return choices.find(choice=>choice.entry?.path===entry); };
+      mock.window.showWarningMessage = async (message,options,...buttons) => { warnings.push({message,options,buttons}); return undefined; };
+      for (const unrelated of [otherEntry,privateHeader,path.join(root,'output/z-other.wh.cpp')]) {
+        mock.window.activeTextEditor = { document: { uri: Uri.file(unrelated) } };
+        const beforeOther = calls.length, beforeWarnings = warnings.length;
+        await commands.get('windhawk.compile')();
+        assert.equal(calls.length,beforeOther,'Another mod or its private files require confirmation');
+        assert.equal(warnings.length,beforeWarnings+1);
+        assert.equal(warnings.at(-1).options.detail,'Source: '+entry);
+      }
+      mock.window.activeTextEditor = { document: { uri: Uri.file(header) } };
+      mock.window.showWarningMessage = async () => { throw Error('A shared header belongs to the selected mod too'); };
+      const beforeSharedHeader = calls.length;
+      await commands.get('windhawk.compile')();
+      assert.equal(calls.length,beforeSharedHeader+1);
+      assert.equal(picks,4,'Ambiguous multi-mod contexts still use the mod picker');
+      mock.window.activeTextEditor = undefined;
+      mock.window.showQuickPick = async () => undefined;
+      const beforePickerCancel = calls.length;
+      await commands.get('windhawk.compile')();
+      assert.equal(calls.length,beforePickerCancel,'Canceling the mod picker never installs');
+      mock.window.showWarningMessage = async () => undefined;
+    }
+
     holdCompile = true; releaseCompile = undefined;
     let sharedCompile = receive({ action: 'compile', root, entry });
     await until(() => releaseCompile);

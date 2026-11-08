@@ -1,5 +1,11 @@
 # Changes
 
+## 1.7.1
+
+- Add **WHAM: Compile and Install Mod** to the Command Palette.
+- Confirm the target when the focused file belongs to a different project or mod. Related headers and generated output need no confirmation.
+- Wait for Windhawk detection when compiling immediately after startup.
+
 ## 1.7.0
 
 - Compact conventional header guards only when local directives prove their bodies inactive. Unknown macros, ordinary code, external includes, and pragmas discard that proof.

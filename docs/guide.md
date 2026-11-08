@@ -123,6 +123,8 @@ node dist/cli.js verify first.wh.cpp /path/to/clang++ -std=c++23 -fsyntax-only
 
 See [current format specification](format-v5.md), [legacy format](format-v1.md), [validation report](validation.md), and [reference decisions](references.md). `examples/demo` contains two independent Windhawk mods sharing nested headers.
 
+Use **WHAM: Compile and Install Mod** in the Command Palette to compile without opening the sidebar. It uses the selected WHAM project and asks for confirmation if the focused file belongs to another project or mod. Included headers and the selected mod's output count as related files.
+
 ## Supported subset and limitations
 
 Source is strict UTF-8, optionally with BOM. Unchanged recovery preserves original bytes and mixed line endings, including absent final newlines. Include cycles, conditional/late `#pragma once`, `#include_next`, module imports, `__has_include`, macro-generated local includes without explicit external rules, and multiline comments splitting directive tokens are diagnosed. Trailing multiline include comments are supported. Local source-root escapes and symlink aliases are rejected. Expansion is capped at 64 levels, 16 MiB per input file, 10000 participating files, and a 64 MiB expansion budget.

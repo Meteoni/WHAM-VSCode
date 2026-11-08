@@ -870,7 +870,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   register('generateCurrent', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state, true); if (entry && await saveRelevant(state)) await enqueue(state, [entry.path]); });
   register('compare', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state); if (entry) await compare(state, entry); });
   register('verify', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state); if (entry) await verify(state, entry); });
-  register('compile', async () => { const state = active(); if (!state) return; const entry = await chooseEntry(state); if (entry) await compileMod(state, entry); });
+  register('compile', async () => {
+    const state = active(); if (!state) return;
+    const entry = await chooseEntry(state); if (!entry) return;
+    const document = vscode.window.activeTextEditor?.document;
+    if (document?.uri.scheme === 'file') {
+      const file = document.uri.fsPath;
+      const related = dependsOn(entry, file) || sameFile(outputPath(state.project, entry.path), file);
+      if (!related) {
+        const editorProject = [...projects.values()].filter(project => contained(project.project.root, file))
+          .sort((left, right) => right.project.root.length - left.project.root.length)[0];
+        const otherMod = editorProject && [...editorProject.entries.values()].some(candidate => candidate !== entry &&
+          (dependsOn(candidate, file) || sameFile(outputPath(editorProject.project, candidate.path), file)));
+        if (editorProject && (editorProject !== state || otherMod)) {
+          const name = entry.metadata?.fields.name?.[0] || path.basename(entry.path), confirm = 'Compile ' + name;
+          const message = `The editor is showing "${path.basename(file)}" in "${path.basename(editorProject.project.root)}", but WHAM will compile and install "${name}" from "${path.basename(state.project.root)}".`;
+          if (await vscode.window.showWarningMessage(message, { modal: true, detail: `Source: ${entry.path}` }, confirm) !== confirm) return;
+        }
+      }
+    }
+    if (!state.windhawk || !sameFile(state.windhawk.root, state.editor.installationPath)) {
+      const ready = state.queue.then(() => refreshRuntime(state));
+      // A failed probe must not leave subsequent project work on a rejected queue.
+      state.queue = ready.catch(() => {});
+      await ready;
+    }
+    await compileMod(state, entry);
+  });
   register('toggleOnSave', async () => { const state = active(); if (state) await updateConfig(state, { ...state.project.config, generate: state.project.config.generate === 'onSave' ? 'manual' : 'onSave' }); });
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('windhawk.projects', {
     resolveWebviewView(webviewView) {
