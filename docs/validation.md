@@ -1,3 +1,11 @@
+## 1.7.1 — 2026-11-08
+
+- All 69 regression tests passed. Compile target confirmation, startup readiness, direct editor setup, customized settings, Skip, save dependency targeting, output protection, and project lifecycle checks remain covered.
+- The save fixture reduced changed-entry disk reads from 8 to 5, configuration reloads from 1 to 0, and entry scans from 1 to 0. The unrelated entry was no longer reread. Both versions performed one expansion; this is an operation-count comparison, not a general timing benchmark.
+- All 78 original/generated preprocessing, final macro-state, and syntax comparisons passed. Native x64 checks also passed parser parity, Unicode argv, cancellation and child cleanup, deadlines, temporary DLL linking, syntax-only x86/x64/ARM64 with metadata flags, and unresolved-symbol rejection.
+- Demo sources, generated output, generated clangd configuration, and exact recovery passed checks with the installed Windhawk compiler. Grammar validation and headless sidebar workflows passed, including five themes and narrow layouts.
+- ARM64 bridge execution and a real install/load cycle were not exercised. MultiWM's reported intermittent startup failure after compilation remains unresolved; this release does not change mod startup behavior.
+
 ## 1.5.11 — 2026-10-14
 
 - All 48 regression tests passed. New cases cover shared installed-mod IDs across projects, blocked competing writes, stopping from a peer card, synchronized Enabled state, cancelled project debounces, in-flight generation after folder removal, fresh watchers on reopening, all C++ service transitions, and custom relative/absolute UTF-16 CompilerPath layouts.

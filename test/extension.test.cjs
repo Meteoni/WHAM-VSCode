@@ -23,7 +23,8 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
   for(const file of ['bin/clang++.exe','bin/clangd.exe','include/windhawk_api.h'])await fs.writeFile(path.join(root,'installation/Compiler',file),'fixture');
   let receive, provider, onSave, onChange, onFolders;
   let noInstallations=false, singleVerifies=0,elevationCloses=0;
-  let holdGenerationFor, releaseGeneration;
+  let holdGenerationFor, releaseGeneration, projectLoads = 0, entryScans = 0;
+  const sourceReads = new Map();
   const commands = new Map(), watchers = [], messages = [], documents = [], stored = {}, globalStored = {}, generations = new Map();
   const disposable = () => ({ dispose() {} });
   const Uri = {
@@ -65,6 +66,15 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     if(name==='./windhawk' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')){const windhawk=load.call(this,name,...args);return {...windhawk,inspectElevation:async()=>({notice:'fixture ready'}),closeElevationSessions:async()=>{elevationCloses++;}};}
     if(name==='./compiler' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js'))return {checkModBuild:async(root,source,signal,onOutput,version,syntaxOnly)=>{assert.equal(syntaxOnly,true);singleVerifies++;}};
     if(name==='./setup' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')){const setup=load.call(this,name,...args);return {...setup,findWindhawk:async()=>noInstallations?[]:setup.findWindhawk()};}
+    if(name==='./io' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')) {
+      const io = load.call(this,name,...args);
+      return {...io, loadProject: async (...args) => { projectLoads++; return io.loadProject(...args); },
+        nodeFiles: {...io.nodeFiles, read: async file => { sourceReads.set(file, (sourceReads.get(file) || 0) + 1); return io.nodeFiles.read(file); }} };
+    }
+    if(name==='./config' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')) {
+      const config = load.call(this,name,...args);
+      return {...config, discoverEntries: async (...args) => { entryScans++; return config.discoverEntries(...args); }};
+    }
     if(name==='./engine' && args[0]?.filename.endsWith('dist'+path.sep+'extension.js')) {
       const engine=load.call(this,name,...args);
       return {...engine,generateEntry:async(project,entry,...rest)=>{
@@ -122,10 +132,19 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     watchers[0].create(Uri.file(third));
     await settle(()=>project()?.entries.length===3 && project().entries.every(entry=>entry.status==='current'));
     await new Promise(resolve=>setTimeout(resolve,450)); generations.clear();
+    const discoveryBeforeSave = { loads: projectLoads, scans: entryScans };
+    sourceReads.clear();
+    // A typing refresh scheduled before Save is consumed by the generation batch.
+    const savedSource = { uri: Uri.file(one), isDirty: true, getText: () => '#include "shared.h"\n// only this entry changed\n' };
+    documents.push(savedSource); onChange({ document: savedSource });
+    documents.length = 0;
     await fs.appendFile(one,'// only this entry changed\n');onSave({uri:Uri.file(one)});watchers[0].change(Uri.file(one));
     await settle(async()=> (await fs.readFile(oneOutput,'utf8')).includes('only this entry changed'));
     await new Promise(resolve=>setTimeout(resolve,450));
     assert.ok(generations.get(one));assert.equal(generations.get(path.join(root,'src/two.cpp')),undefined);assert.equal(generations.get(third),undefined,'Independent mods are not expanded after a .cpp save');
+    assert.deepEqual({ loads: projectLoads, scans: entryScans }, discoveryBeforeSave, 'Ordinary saves do not reload config or rescan entry files');
+    assert.ok(sourceReads.get(one) <= 3, `Save and typing share one Draft reconciliation (entry reads: ${sourceReads.get(one)})`);
+    assert.equal(sourceReads.get(third), undefined, 'Unrelated entry source is not reread');
     generations.clear();
     const outputTime=(await fs.stat(oneOutput)).mtimeMs;
     const future=new Date(Date.now()+2000);await fs.utimes(shared,future,future);onSave({uri:Uri.file(shared)});
@@ -209,7 +228,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       if(!options?.modal)return;
       assert.equal(options.modal,true);
       const titles=choices.map(choice=>typeof choice==='string'?choice:choice.title);
-      const title=titles.includes('Use empty folder')?'Use empty folder':titles.includes('Indentation only')?'Indentation only':'2 spaces';
+      const title=titles.includes('Use empty folder')?'Use empty folder':titles.includes('Customize…')?'Customize…':titles.includes('Indentation only')?'Indentation only':'2 spaces';
       return choices[titles.indexOf(title)];
     };
     const opened = [];
@@ -226,6 +245,38 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     const loadedProjects=messages.filter(message=>message.type==='state').at(-1).projects;
     assert.ok(loadedProjects.every(project=>project.editor.installationPath===path.join(root,'installation')),'Every project uses the global installation, including indentation-only setup');
     assert.ok(Object.values(globalStored.localPreferences.projects).every(project=>project.installationPath===undefined));
+    // Default Apply reuses the summary, without installation or indentation prompts.
+    const setupDialogs = [];
+    mock.window.showInformationMessage = async (message, options, ...choices) => {
+      if (!options?.modal) return;
+      setupDialogs.push(message);
+      assert.equal(message, 'Set up the editor?');
+      assert.match(options.detail, /Windhawk: .*installation\nLanguage service: clangd\nIndentation: 2 spaces/);
+      assert.deepEqual(choices.map(choice => choice.title), ['Apply', 'Customize…', 'Skip']);
+      return choices[0];
+    };
+    await commands.get('windhawk.configureEditor')();
+    assert.deepEqual(setupDialogs, ['Set up the editor?']);
+    const beforeSkip = await fs.readFile(path.join(newRoot, '.vscode/settings.json'));
+    const preferencesBeforeSkip = JSON.stringify(globalStored.localPreferences);
+    mock.window.showInformationMessage = async (message, options, ...choices) => choices.find(choice => choice.title === 'Skip');
+    await commands.get('windhawk.configureEditor')();
+    assert.deepEqual(await fs.readFile(path.join(newRoot, '.vscode/settings.json')), beforeSkip);
+    assert.equal(JSON.stringify(globalStored.localPreferences), preferencesBeforeSkip);
+    // Customize changes the service and indentation, with no final confirmation.
+    const customDialogs = [];
+    mock.window.showInformationMessage = async (message, options, ...choices) => {
+      customDialogs.push(message);
+      const title = message === 'Set up the editor?' ? 'Customize…' : message === 'Choose language service' ? 'Microsoft C/C++' : 'Tabs';
+      return choices.find(choice => choice.title === title);
+    };
+    mock.window.showQuickPick = async choices => choices[0];
+    await commands.get('windhawk.configureEditor')();
+    assert.deepEqual(customDialogs, ['Set up the editor?', 'Choose language service', 'Choose indentation']);
+    assert.equal(globalStored.localPreferences.projects[newRoot].integration, 'cpp');
+    const customized = JSON.parse(await fs.readFile(path.join(newRoot, '.vscode/settings.json'), 'utf8'))['[cpp]'];
+    assert.equal(customized['editor.insertSpaces'], false);
+    assert.equal(customized['editor.tabSize'], 2, 'Tabs preserve the existing display width');
     // Apply is direct; Review opens a diff without changing files or preferences.
     const settings={...require('../dist/setup').editorDefaults,...globalStored.localPreferences.projects[newRoot],indentSize:4};
     mock.window.showQuickPick=async()=>{throw new Error('Apply must not ask for a second confirmation');};
@@ -310,6 +361,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       const titles=choices.map(choice=>typeof choice==='string'?choice:choice.title);
       if(titles.includes('Recover files'))return 'Recover files';
       if (titles.includes('Use this folder')) return 'Use this folder';
+      if (titles.includes('Customize…')) return choices[titles.indexOf('Customize…')];
       if (titles.includes('Indentation only')) {
         gitRun('config', 'user.name', 'WHAM Test'); gitRun('config', 'user.email', 'wham-test@example.invalid');
         gitRun('config', 'commit.gpgsign', 'false'); gitRun('config', 'core.hooksPath', path.join(recoveredRoot, 'empty-hooks'));
@@ -352,6 +404,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       if(!options?.modal)return;
       const titles=choices.map(choice=>typeof choice==='string'?choice:choice.title);
       if (titles.includes('Use empty folder')) return 'Use empty folder';
+      if (titles.includes('Customize…')) return choices[titles.indexOf('Customize…')];
       if (titles.includes('Indentation only')) {
         for (const key of ['user.name', 'user.email']) execFileSync(git, ['-C', failedRoot, 'config', key, ''], { stdio: 'pipe' });
         return choices[titles.indexOf('Indentation only')];

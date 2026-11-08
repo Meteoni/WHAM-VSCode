@@ -10,7 +10,7 @@ Write a Windhawk mod across several C++ files, then generate a single `.wh.cpp` 
 
 1. Install the WHAM `.vsix` through **Extensions: Install from VSIX…** in VS Code.
 2. Open **WHAM** in the activity bar. Choose **New project**, **Existing project**, or **Recover mods**.
-3. Select your Windhawk installation and indentation. **Extension settings** holds installation and elevation preferences; **Project settings → Editor** holds local project choices and formatting.
+3. Apply the suggested editor setup, customize it, or skip it. **Extension settings** holds installation and elevation preferences; **Project settings → Editor** holds local project choices and formatting.
 
 **Open project** remembers recent folders and opens existing WHAM projects without setup prompts. Browse to select another source folder.
 

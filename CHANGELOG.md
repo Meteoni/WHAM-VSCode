@@ -2,6 +2,8 @@
 
 ## 1.7.1
 
+- Avoid project rescans on ordinary source saves and combine scheduled Draft refreshes with generation.
+- Show editor setup in one Apply / Customize… / Skip summary, reusing existing preferences and detected Windhawk installations.
 - Add **WHAM: Compile and Install Mod** to the Command Palette.
 - Confirm the target for unrelated or unrecognized C/C++ source, including untitled buffers. Related files and non-source documents need no confirmation.
 - Wait for Windhawk detection when compiling immediately after startup.

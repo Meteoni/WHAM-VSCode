@@ -270,7 +270,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const poll = state.pollInstalled; state.pollInstalled = false;
         const entries = [...state.draftPending].map(file => state.entries.get(file)).filter((entry): entry is EntryState => !!entry);
         state.draftPending.clear();
-        await refreshDraft(state, entries);
+        if (entries.length) await refreshDraft(state, entries);
         if (poll) await refreshRuntime(state);
       }).catch(error => { state.runtimePending = false; log.appendLine(String(error)); });
     }, 350);
@@ -335,18 +335,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     entry.ownedHash = checksum(result.bytes); storedHashes[output] = entry.ownedHash;
     entry.status = 'current'; entry.message = `${result.dependencies.size} source file(s)`;
   };
-  const enqueue = (state: ProjectState, targets?: string[], force = false): Promise<void> => {
+  const enqueue = (state: ProjectState, targets?: string[], options: { force?: boolean; refreshProject?: boolean } = {}): Promise<void> => {
     state.queue = state.queue.then(async () => {
       if (disposed || state.removed) return;
       try {
-        await refresh(state);
-        for (const entry of state.entries.values()) {
-          if (targets && !targets.includes(entry.path)) continue;
-          try { await generate(state, entry, force); }
+        // Save events already use the known dependency graph; structural/config
+        // events refresh it separately. Explicit commands still discover entries.
+        if (options.refreshProject !== false) await refresh(state);
+        const entries = [...state.entries.values()].filter(entry => !targets || targets.includes(entry.path));
+        for (const entry of entries) state.draftPending.delete(entry.path);
+        for (const entry of entries) {
+          try { await generate(state, entry, options.force ?? false); }
           catch (error) { entry.status = 'stale'; entry.message = String(error); log.appendLine(String(error)); }
         }
         await context.workspaceState.update('outputHashes', storedHashes);
-        await refreshDraft(state, [...state.entries.values()].filter(entry => !targets || targets.includes(entry.path)));
+        await refreshDraft(state, entries);
+        if (options.refreshProject === false) state.git = await gitStatus(state.project.root, gitExecutable());
       } catch (error) { state.error = (error as Error).message; log.appendLine(String(error)); }
       presentDiagnostics(); publish();
     });
@@ -354,11 +358,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   const schedule = (state: ProjectState, targets: string[]) => {
     if (disposed || state.removed) return;
-    for (const target of targets) state.pending.add(target);
+    for (const target of targets) {
+      state.pending.add(target);
+      // Generation reconciles Draft too; retire the earlier typing/save refresh.
+      state.draftPending.delete(target);
+    }
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {
       const targets = [...state.pending]; state.pending.clear();
-      void enqueue(state, targets);
+      void enqueue(state, targets, { refreshProject: false });
     }, state.project.config.debounceMs);
   };
   const changed = (file: string, discovery = false) => {
@@ -395,14 +403,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await refresh(state);
             if (configurationChanged) await refreshEditorConfiguration(state);
             const affected = [...state.entries.values()].filter(entry => configurationChanged || !entry.draft || targets.includes(entry));
-            scheduleRefresh(state, false, affected);
             if (state.project.config.generate === 'onSave') schedule(state, affected.map(entry => entry.path));
+            else scheduleRefresh(state, false, affected);
           } catch (error) { state.error = String(error); }
           publish();
         });
       } else if (targets.length) {
-        scheduleRefresh(state, false, targets);
         if (state.project.config.generate === 'onSave') schedule(state, targets.map(entry => entry.path));
+        else scheduleRefresh(state, false, targets);
         publish();
       }
     }
@@ -756,33 +764,62 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return true;
   };
   const configureEditor = async (state: ProjectState) => {
-    const choice = (await vscode.window.showInformationMessage('Project editor setup', { modal: true }, { title: 'Windhawk and indentation' }, { title: 'Indentation only' }, { title: 'Skip', isCloseAffordance: true }))?.title;
-    if (!choice || choice.startsWith('Skip')) return;
-    let installationPath = state.editor.installationPath;
-    if (choice === 'Windhawk and indentation' && !installationPath) {
-      const found = await findWindhawk();
-      const selected = found.length ? await vscode.window.showQuickPick([...found, 'Browse for Windhawk installation…'], { title: 'Select Windhawk installation (must contain Compiler)' }) : 'Browse for Windhawk installation…';
+    const settings = { ...state.editor };
+    const installations = settings.installationPath ? [] : await findWindhawk();
+    if (!settings.installationPath && installations.length === 1) settings.installationPath = installations[0];
+    const languageService = { cpp: 'Microsoft C/C++', clangd: 'clangd', both: 'Microsoft C/C++ and clangd' }[settings.integration];
+    const indentation = settings.indentStyle === 'tabs' ? `Tabs (width ${settings.indentSize})` : `${settings.indentSize} ${settings.indentSize === 1 ? 'space' : 'spaces'}`;
+    const choice = (await vscode.window.showInformationMessage('Set up the editor?', {
+      modal: true,
+      detail: `Windhawk: ${settings.installationPath || 'Not selected (choose a folder on Apply)'}\nLanguage service: ${languageService}\nIndentation: ${indentation}`
+    }, { title: 'Apply' }, { title: 'Customize…' }, { title: 'Skip', isCloseAffordance: true }))?.title;
+    if (!choice || choice === 'Skip') return;
+    let indentationOnly = false;
+    if (choice === 'Customize…') {
+      const service = (await vscode.window.showInformationMessage('Choose language service', { modal: true },
+        { title: 'Microsoft C/C++' }, { title: 'clangd' }, { title: 'Both' }, { title: 'Indentation only' },
+        { title: 'Skip', isCloseAffordance: true }))?.title;
+      if (!service || service === 'Skip') return;
+      indentationOnly = service === 'Indentation only';
+      if (!indentationOnly) settings.integration = service === 'Both' ? 'both' : service === 'clangd' ? 'clangd' : 'cpp';
+    }
+    if (indentationOnly) settings.installationPath = '';
+    else if (!settings.installationPath || choice === 'Customize…') {
+      const available = [...new Set([settings.installationPath, ...(settings.installationPath ? await findWindhawk() : installations)].filter(Boolean))];
+      const selected = available.length ? await vscode.window.showQuickPick([...available, 'Browse for Windhawk installation…'], { title: 'Select Windhawk installation (must contain Compiler)' }) : 'Browse for Windhawk installation…';
       if (!selected) return;
-      if (selected.startsWith('Browse')) {
+      if (selected === 'Browse for Windhawk installation…') {
         const folder = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Choose Windhawk installation' });
-        if (!folder?.[0]) return; installationPath = folder[0].fsPath;
-      } else installationPath = selected;
+        if (!folder?.[0]) return;
+        settings.installationPath = folder[0].fsPath;
+      } else settings.installationPath = selected;
     }
-    const style = (await vscode.window.showInformationMessage('Choose indentation', { modal: true, detail: 'Change this later in Project settings → Editor.' }, { title: '4 spaces' }, { title: '2 spaces' }, { title: 'Tabs' }, { title: 'Custom width…' }, { title: 'Skip editor setup', isCloseAffordance: true }))?.title;
-    if (!style || style === 'Skip editor setup') return;
-    let indentSize = style === '2 spaces' ? 2 : 4;
-    if (style.startsWith('Custom')) {
-      const width = await vscode.window.showInputBox({ title: 'Indentation width', value: String(state.editor.indentSize), validateInput: value => /^([1-9]|1[0-6])$/.test(value) ? undefined : 'Enter 1–16.' });
-      if (!width) return; indentSize = Number(width);
+    if (choice === 'Customize…') {
+      const style = (await vscode.window.showInformationMessage('Choose indentation', { modal: true }, { title: '4 spaces' }, { title: '2 spaces' }, { title: 'Tabs' }, { title: 'Custom width…' }, { title: 'Skip editor setup', isCloseAffordance: true }))?.title;
+      if (!style || style === 'Skip editor setup') return;
+      settings.indentStyle = style === 'Tabs' ? 'tabs' : 'spaces';
+      settings.indentSize = style === '2 spaces' ? 2 : style === 'Tabs' ? settings.indentSize : 4;
+      if (style === 'Custom width…') {
+        const width = await vscode.window.showInputBox({ title: 'Indentation width', value: String(state.editor.indentSize), validateInput: value => /^([1-9]|1[0-6])$/.test(value) ? undefined : 'Enter 1–16.' });
+        if (!width) return;
+        settings.indentSize = Number(width);
+      }
     }
-    const settings = { ...state.editor, installationPath: choice === 'Indentation only' ? '' : installationPath, indentStyle: style === 'Tabs' ? 'tabs' as const : 'spaces' as const, indentSize };
-    if (choice === 'Windhawk and indentation' && installationPath !== localPreferences.computer.installationPath) {
+    if (settings.installationPath && settings.installationPath !== localPreferences.computer.installationPath) {
       if ([...projects.values()].some(project => [...project.entries.values()].some(entry => entry.busy))) throw new Error('Wait for the current Windhawk operation before changing preferences.');
-      localPreferences.computer.installationPath = installationPath;
+      // Validate before saving a newly selected installation as a computer preference.
+      await editorConfiguration(state.project, settings, (await inspectWindhawk(settings.installationPath)).compileFlags);
+      localPreferences.computer.installationPath = settings.installationPath;
       await context.globalState.update('localPreferences', localPreferences);
       for (const project of projects.values()) { project.editor = await resolveEditor(project.project.root); await refreshRuntime(project); await refreshDraft(project); }
     }
-    await applyEditor(state, settings);
+    if (await applyEditor(state, settings) && !indentationOnly && settings.integration !== state.editor.integration) {
+      const previousKey = Object.keys(localPreferences.projects).find(key => sameFile(key, state.project.root));
+      if (previousKey) delete localPreferences.projects[previousKey];
+      localPreferences.projects[state.project.root] = { integration: settings.integration };
+      await context.globalState.update('localPreferences', localPreferences);
+      state.editor = await resolveEditor(state.project.root); await refreshEditorConfiguration(state); publish();
+    }
   };
   const chooseEntry = async (state: ProjectState, onlyCurrent = false): Promise<EntryState | undefined> => {
     const file = vscode.window.activeTextEditor?.document.uri.fsPath;
@@ -855,7 +892,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       case 'compare': await compare(state, entry); break;
       case 'restore': await restore(outputPath(state.project, entry.path)); break;
       case 'discard':
-        if (await vscode.window.showWarningMessage(`Discard saved output edits for ${path.basename(entry.path)}?`, { modal: true }, 'Regenerate and Discard') === 'Regenerate and Discard' && await saveRelevant(state)) await enqueue(state, [entry.path], true);
+        if (await vscode.window.showWarningMessage(`Discard saved output edits for ${path.basename(entry.path)}?`, { modal: true }, 'Regenerate and Discard') === 'Regenerate and Discard' && await saveRelevant(state)) await enqueue(state, [entry.path], { force: true });
         break;
       case 'open': await vscode.window.showTextDocument(vscode.Uri.file(entry.path), typeof line === 'number' && Number.isInteger(line) && line >= 0 ? { selection: new vscode.Range(line, 0, line, 0) } : undefined); break;
       case 'output': await vscode.window.showTextDocument(vscode.Uri.file(outputPath(state.project, entry.path))); break;
