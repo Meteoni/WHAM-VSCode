@@ -130,6 +130,10 @@
         "title": "WHAM: Verify Generated Mod with Compiler"
       },
       {
+        "command": "windhawk.compile",
+        "title": "WHAM: Compile and Install Generated Mod with Compiler"
+      },
+      {
         "command": "windhawk.logs",
         "title": "WHAM: Show Generation Log"
       }
