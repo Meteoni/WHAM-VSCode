@@ -123,7 +123,7 @@ node dist/cli.js verify first.wh.cpp /path/to/clang++ -std=c++23 -fsyntax-only
 
 See [current format specification](format-v5.md), [legacy format](format-v1.md), [validation report](validation.md), and [reference decisions](references.md). `examples/demo` contains two independent Windhawk mods sharing nested headers.
 
-Use **WHAM: Compile and Install Mod** in the Command Palette to compile without opening the sidebar. It uses the selected WHAM project and asks for confirmation if the focused file belongs to another project or mod. Included headers and the selected mod's output count as related files.
+Use **WHAM: Compile and Install Mod** in the Command Palette to compile without opening the sidebar. It uses the selected WHAM project and asks for confirmation when focused C/C++ source belongs to another project or mod, or cannot be associated with the target. This includes untitled C/C++ buffers. Included headers and the selected mod's output count as related files. Non-source documents do not trigger an extra warning.
 
 ## Supported subset and limitations
 

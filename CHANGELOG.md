@@ -3,7 +3,7 @@
 ## 1.7.1
 
 - Add **WHAM: Compile and Install Mod** to the Command Palette.
-- Confirm the target when the focused file belongs to a different project or mod. Related headers and generated output need no confirmation.
+- Confirm the target for unrelated or unrecognized C/C++ source, including untitled buffers. Related files and non-source documents need no confirmation.
 - Wait for Windhawk detection when compiling immediately after startup.
 
 ## 1.7.0

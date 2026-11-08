@@ -874,19 +874,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const state = active(); if (!state) return;
     const entry = await chooseEntry(state); if (!entry) return;
     const document = vscode.window.activeTextEditor?.document;
-    if (document?.uri.scheme === 'file') {
+    const sourceDocument = document && (['c', 'cpp'].includes(document.languageId) ||
+      /\.(?:c|cc|cpp|cxx|c\+\+|h|hh|hpp|hxx|h\+\+|inl|inc|ipp|tpp|ixx|cppm)$/i.test(document.uri.fsPath));
+    if (document && sourceDocument) {
       const file = document.uri.fsPath;
-      const related = dependsOn(entry, file) || sameFile(outputPath(state.project, entry.path), file);
+      const related = document.uri.scheme === 'file' && (dependsOn(entry, file) || sameFile(outputPath(state.project, entry.path), file));
       if (!related) {
-        const editorProject = [...projects.values()].filter(project => contained(project.project.root, file))
-          .sort((left, right) => right.project.root.length - left.project.root.length)[0];
+        const editorProject = document.uri.scheme === 'file' ? [...projects.values()].filter(project => contained(project.project.root, file))
+          .sort((left, right) => right.project.root.length - left.project.root.length)[0] : undefined;
         const otherMod = editorProject && [...editorProject.entries.values()].some(candidate => candidate !== entry &&
           (dependsOn(candidate, file) || sameFile(outputPath(editorProject.project, candidate.path), file)));
-        if (editorProject && (editorProject !== state || otherMod)) {
-          const name = entry.metadata?.fields.name?.[0] || path.basename(entry.path), confirm = 'Compile ' + name;
-          const message = `The editor is showing "${path.basename(file)}" in "${path.basename(editorProject.project.root)}", but WHAM will compile and install "${name}" from "${path.basename(state.project.root)}".`;
-          if (await vscode.window.showWarningMessage(message, { modal: true, detail: `Source: ${entry.path}` }, confirm) !== confirm) return;
-        }
+        const name = entry.metadata?.fields.name?.[0] || path.basename(entry.path), confirm = 'Compile ' + name;
+        const message = editorProject && (editorProject !== state || otherMod)
+          ? `The editor is showing "${path.basename(file)}" in "${path.basename(editorProject.project.root)}", but WHAM will compile and install "${name}" from "${path.basename(state.project.root)}".`
+          : `WHAM couldn't associate "${path.basename(file)}" with the selected mod. Compile and install "${name}" from "${path.basename(state.project.root)}"?`;
+        if (await vscode.window.showWarningMessage(message, { modal: true, detail: `Source: ${entry.path}` }, confirm) !== confirm) return;
       }
     }
     if (!state.windhawk || !sameFile(state.windhawk.root, state.editor.installationPath)) {

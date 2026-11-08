@@ -253,6 +253,45 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
         assert.equal(calls.length,beforeRelated+1,'Related entry, header, and output compile without confirmation: '+related);
       }
 
+      // Unknown source ownership also requires a named target; ordinary documents do not.
+      mock.window.showWarningMessage = async (message,options,...buttons) => { warnings.push({message,options,buttons}); return undefined; };
+      for (const document of [
+        { uri: Uri.file(path.join(root,'notes/scratch.cpp')), languageId: 'cpp' },
+        { uri: Uri.file(path.resolve(root,'../external.HPP')), languageId: 'plaintext' },
+        { uri: Uri.file(path.join(root,'notes/extensionless')), languageId: 'cpp' },
+        { uri: { scheme:'untitled', fsPath:'Untitled-1' }, languageId: 'cpp' }
+      ]) {
+        mock.window.activeTextEditor = { document };
+        const beforeUnknown = calls.length, beforeWarnings = warnings.length;
+        await commands.get('windhawk.compile')();
+        assert.equal(calls.length,beforeUnknown,'Canceling an unknown-source confirmation never installs');
+        assert.equal(warnings.length,beforeWarnings+1);
+        assert.ok(warnings.at(-1).message.includes("couldn't associate"));
+        assert.ok(warnings.at(-1).message.includes(path.basename(document.uri.fsPath)));
+        assert.ok(warnings.at(-1).message.includes('Runtime test') && warnings.at(-1).message.includes(path.basename(root)));
+        assert.equal(warnings.at(-1).options.modal,true);
+        assert.equal(warnings.at(-1).options.detail,'Source: '+entry);
+        assert.deepEqual(warnings.at(-1).buttons,['Compile Runtime test']);
+      }
+      mock.window.showWarningMessage = async (message,options,...buttons) => buttons[0];
+      const beforeUnknownConfirm = calls.length;
+      await commands.get('windhawk.compile')();
+      assert.equal(calls.length,beforeUnknownConfirm+1,'Explicit confirmation compiles the selected mod, including from untitled source');
+      assert.ok(calls.at(-1).input.includes('int shared = 1'));
+
+      mock.window.showWarningMessage = async () => { throw Error('Non-source documents must not trigger compile confirmation'); };
+      for (const document of [
+        { uri: Uri.file(path.join(root,'README.md')), languageId: 'markdown' },
+        { uri: Uri.file(path.join(peerRoot,'README.md')), languageId: 'markdown' },
+        { uri: Uri.file(path.join(peerRoot,'.vscode/settings.json')), languageId: 'jsonc' },
+        { uri: Uri.file(path.join(root,'windhawk-amalgamation.json')), languageId: 'json' }
+      ]) {
+        mock.window.activeTextEditor = { document };
+        const beforeDocument = calls.length;
+        await commands.get('windhawk.compile')();
+        assert.equal(calls.length,beforeDocument+1,'Non-source documents compile without an extra warning');
+      }
+
       const otherEntry = path.join(root,'src/z-other.cpp'), privateHeader = path.join(root,'src/z-private.h');
       await fs.writeFile(privateHeader,'int private_value = 1;\n');
       await fs.writeFile(otherEntry,original.replace('@name Runtime test','@name Other mod').replace('#include "header.h"','#include "header.h"\n#include "z-private.h"'));
