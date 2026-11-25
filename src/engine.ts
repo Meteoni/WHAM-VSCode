@@ -1,10 +1,16 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { contained, portablePath, validateConfig } from './config';
+import { contained, portablePath, portableRelative, validateConfig } from './config';
 import { scanSource } from './scanner';
 import { FileAccess, GenerationResult, Manifest, Project, RecoveryData, RestoreCandidate, RestoreResult } from './types';
 
+const MiB = 1024 * 1024;
+/** Bounds on work for runaway or hostile inputs, shared by generation and recovery. */
+const limits = { sourceBytes: 16 * MiB, containerBytes: 64 * MiB, depth: 64, files: 10000 } as const;
+
 export const checksum = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex');
+/** Synthetic guard that replaces a header's `#pragma once`, stable per file path. */
+const onceMacro = (display: string) => 'WHAM_ONCE_' + checksum(display).slice(0, 24).toUpperCase();
 const utf8 = (bytes: Buffer): string => {
   const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
   if (text.includes('\0')) throw new Error('NUL bytes are not supported in C++ sources.');
@@ -160,24 +166,24 @@ export async function generateEntry(project: Project, entryPath: string, files: 
     validateConfig(project.config);
     const canonicalRoot = await files.identity(sourceRoot);
     const expand = async (file: string, stack: string[], unconditional: boolean, occurrenceId: number): Promise<{ body: string; reference?: number }> => {
-      if (stack.length >= 64) throw new Error('Expansion exceeds 64 levels. Reduce recursive include depth.');
+      if (stack.length >= limits.depth) throw new Error(`Expansion exceeds ${limits.depth} levels. Reduce recursive include depth.`);
       if (!contained(sourceRoot, file)) throw new Error(`Local include escapes source root: ${file}`);
       const canonical = await files.identity(file);
       if (!contained(canonicalRoot, canonical)) throw new Error(`Symlink escapes source root: ${file}`);
       if (stack.includes(canonical)) throw new Error(`Include cycle: ${[...stack, canonical].map(item => path.relative(project.root, item)).join(' -> ')}`);
-      const display = path.relative(project.root, file).split(path.sep).join('/');
+      const display = portableRelative(project.root, file);
       portablePath(display);
       const recorded = identities.get(canonical);
       if (recorded && recorded !== display) throw new Error(`Ambiguous file identity: ${recorded} and ${display}`);
       identities.set(canonical, display);
       const bytes = await files.read(file), hash = checksum(bytes);
-      if (bytes.length > 16 * 1024 * 1024) throw new Error(`Source exceeds 16 MiB: ${display}`);
+      if (bytes.length > limits.sourceBytes) throw new Error(`Source exceeds ${limits.sourceBytes / MiB} MiB: ${display}`);
       const priorHash = result.dependencies.get(canonical);
       if (priorHash && priorHash !== hash) throw new Error(`Source changed during generation: ${display}`);
       result.dependencies.set(canonical, hash);
       const decoded = utf8(bytes), bom = decoded.startsWith('\uFEFF');
       manifestFiles.set(display, { path: display, hash, bom });
-      if (manifestFiles.size > 10000) throw new Error('More than 10000 source files participate in one entry.');
+      if (manifestFiles.size > limits.files) throw new Error(`More than ${limits.files} source files participate in one entry.`);
       const retainedBody = guaranteedOnce.get(canonical);
       if (retainedBody !== undefined) return { body: '', reference: retainedBody };
       const source = bom ? decoded.slice(1) : decoded;
@@ -244,9 +250,9 @@ export async function generateEntry(project: Project, entryPath: string, files: 
             report(file, line, '#pragma once must be unconditional and before other code or directives.'); continue;
           }
           once = true;
-          const onceMacro = 'WHAM_ONCE_' + checksum(display).slice(0, 24).toUpperCase();
-          const [yes, no] = splitCondition('ifndef', onceMacro, macroStates);
-          macroStates = yes; onceSkippedState = no; macroStates?.set(onceMacro, true);
+          const onceName = onceMacro(display);
+          const [yes, no] = splitCondition('ifndef', onceName, macroStates);
+          macroStates = yes; onceSkippedState = no; macroStates?.set(onceName, true);
           output += source.slice(cursor, start) + transform(start, source.slice(start, end), '', 'pragma-once'); cursor = end; continue;
         }
         if (name !== 'include') continue;
@@ -277,7 +283,7 @@ export async function generateEntry(project: Project, entryPath: string, files: 
         try { child = await expand(target, [...stack, canonical], unconditional && conditionDepth === 0, id); }
         catch (error) { report(file, line, (error as Error).message); continue; }
         const tail = child.body && !child.body.endsWith('\n') ? '\n' : '';
-        const childPath = path.relative(project.root, target).split(path.sep).join('/');
+        const childPath = portableRelative(project.root, target);
         const expansion = child.reference !== undefined
           ? before + marker({ type: 'reference', id, path: childPath, original: source.slice(start, end), before, bodyId: child.reference })
           : before + marker({ type: 'include', id, path: childPath, original: source.slice(start, end), before, tail }) + child.body + tail + marker({ type: 'include-end', id });
@@ -293,22 +299,22 @@ export async function generateEntry(project: Project, entryPath: string, files: 
       }
       output += source.slice(cursor);
       if (once) {
-        const guard = 'WHAM_ONCE_' + checksum(display).slice(0, 24).toUpperCase();
-        const open = `#ifndef ${guard}\n#define ${guard}\n`, close = `#endif // ${guard}\n`;
+        const onceGuard = onceMacro(display);
+        const open = `#ifndef ${onceGuard}\n#define ${onceGuard}\n`, close = `#endif // ${onceGuard}\n`;
         const id = nextId++;
         const tail = output && !output.endsWith('\n') ? '\n' : '';
         output = marker({ type: 'transform', id, kind: 'guard-open', original: '', before: '', hash: checksum(open) }) + open + marker({ type: 'transform-end', id }) + output + tail +
           marker({ type: 'transform', id: nextId, kind: 'guard-close', original: '', before: tail, hash: checksum(close) }) + close + marker({ type: 'transform-end', id: nextId++ });
       }
       generatedSize += Buffer.byteLength(output);
-      if (generatedSize > 64 * 1024 * 1024) throw new Error('Expanded output exceeds 64 MiB. Reduce repeated includes.');
+      if (generatedSize > limits.containerBytes) throw new Error(`Expanded output exceeds ${limits.containerBytes / MiB} MiB. Reduce repeated includes.`);
       if (once && unconditional && occurrenceId > 0) guaranteedOnce.set(canonical, occurrenceId);
       if (guard && occurrenceId > 0 && !retainedGuardBodies.has(canonical)) retainedGuardBodies.set(canonical, occurrenceId);
       return { body: stack.length === 0 && bom ? '\uFEFF' + output : output };
     };
     const { body } = await expand(path.resolve(entryPath), [], true, 0);
     if (result.diagnostics.some(item => item.severity === 'error')) return result;
-    const root = path.relative(project.root, entryPath).split(path.sep).join('/');
+    const root = portableRelative(project.root, entryPath);
     const rootRelative = path.posix.relative(project.config.sourceDirectory, root);
     const config = { ...project.config, entries: [rootRelative.replace(/([*?\[\]{}()!+@])/g, '[$1]')], exclude: [] };
     const tail = body && !body.endsWith('\n') ? '\n' : '';
@@ -328,7 +334,7 @@ export async function generateEntry(project: Project, entryPath: string, files: 
     }
     const container = body + tail + '// #region WHAM recovery\n// clang-format off\n// WHAM@5 recovery-begin\n' + footerLines.join('\n') +
       '\n// WHAM@5 recovery-end\n// clang-format on\n// #endregion\n';
-    if (Buffer.byteLength(container) > 64 * 1024 * 1024) throw new Error('Recovery container exceeds 64 MiB.');
+    if (Buffer.byteLength(container) > limits.containerBytes) throw new Error(`Recovery container exceeds ${limits.containerBytes / MiB} MiB.`);
     result.bytes = Buffer.from(container);
     // Recompute spans against the final container so nested includes and guards
     // cannot shift recorded offsets. Offsets are UTF-16 indexes, as used by VS Code.
@@ -367,12 +373,12 @@ export async function generateEntry(project: Project, entryPath: string, files: 
 
 /** Reconstruct candidates without writing; divergent occurrences require adapter-level resolution. */
 export function restoreSource(bytes: Buffer): RestoreResult {
-  if (bytes.length > 64 * 1024 * 1024) throw new Error('Recovery container exceeds 64 MiB.');
+  if (bytes.length > limits.containerBytes) throw new Error(`Recovery container exceeds ${limits.containerBytes / MiB} MiB.`);
   const source = utf8(bytes), records = recoveryMarkers(source);
   const footer = records.at(-1);
   if (!footer || footer.value.type !== 'manifest' || footer.end !== source.length) throw new Error('Missing or misplaced WHAM footer manifest.');
   const manifest = footer.value as Manifest;
-  if (![1, 2, 3, 4, 5].includes(manifest.version) || !Array.isArray(manifest.files) || manifest.files.length > 10000) throw new Error('Unsupported or malformed manifest.');
+  if (![1, 2, 3, 4, 5].includes(manifest.version) || !Array.isArray(manifest.files) || manifest.files.length > limits.files) throw new Error('Unsupported or malformed manifest.');
   portablePath(manifest.root); validateConfig(manifest.config);
   if (manifest.tail !== '' && manifest.tail !== '\n') throw new Error('Invalid root padding.');
   const fileRecords = new Map<string, Manifest['files'][number]>(), cases = new Set<string>();
@@ -404,7 +410,7 @@ export function restoreSource(bytes: Buffer): RestoreResult {
   const includePaths = new Map(records.filter(record => record.value.type === 'include').map(record => [record.value.id as number, record.value.path as string]));
   let recordIndex = 0;
   const parseRegion = (start: number, expectedId?: number, depth = 0): { body: string; end: number } => {
-    if (depth > 64) throw new Error('Recovery nesting exceeds 64 levels.');
+    if (depth > limits.depth) throw new Error(`Recovery nesting exceeds ${limits.depth} levels.`);
     let cursor = start, body = '';
     while (recordIndex < records.length - 1) {
       const record = records[recordIndex++], value = record.value;

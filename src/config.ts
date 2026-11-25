@@ -18,6 +18,11 @@ export function portablePath(value: unknown): string {
   return value;
 }
 
+/** Relative path with forward slashes, as stored in manifests and configuration. */
+export function portableRelative(root: string, target: string): string {
+  return path.relative(root, target).split(path.sep).join('/');
+}
+
 export function contained(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));

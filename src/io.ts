@@ -2,9 +2,21 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { contained, defaults, portablePath, validateConfig } from './config';
+import { contained, defaults, portablePath, portableRelative, validateConfig } from './config';
 import { checksum } from './engine';
 import { FileAccess, Project, RestoreResult } from './types';
+
+const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
+
+/** Read a file, or return undefined when it does not exist. Other errors propagate. */
+export async function readIfExists(file: string): Promise<Buffer | undefined> {
+  try { return await fs.readFile(file); } catch (error) { if (isMissing(error)) return undefined; throw error; }
+}
+
+/** True when a file's bytes (undefined = missing) differ from an earlier snapshot. */
+export function changedSince(current: Buffer | undefined, snapshot: Buffer | undefined): boolean {
+  return current ? !snapshot || !current.equals(snapshot) : !!snapshot;
+}
 
 /** Local filesystem adapter; canonical identities prevent source symlink escapes. */
 export const nodeFiles: FileAccess = {
@@ -84,11 +96,10 @@ export async function assertSafeDestination(root: string, relative: string): Pro
 }
 
 export async function writeOutput(project: Project, output: string, bytes: Buffer): Promise<void> {
-  await assertSafeDestination(project.root, path.relative(project.root, output).split(path.sep).join('/'));
+  await assertSafeDestination(project.root, portableRelative(project.root, output));
   await fs.mkdir(path.dirname(output), { recursive: true });
   const temporary = output + '.' + randomUUID() + '.tmp';
-  let previous: Buffer | undefined;
-  try { previous = await fs.readFile(output); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const previous = await readIfExists(output);
   try {
     await fs.writeFile(temporary, bytes, { flag: 'wx' });
     for (let attempt = 0; ; attempt++) {
@@ -97,10 +108,8 @@ export async function writeOutput(project: Project, output: string, bytes: Buffe
         // Windows readers and indexers can briefly prevent an atomic replacement.
         if (process.platform !== 'win32' || attempt >= 4 || !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
         await delay(20 * (attempt + 1));
-        await assertSafeDestination(project.root, path.relative(project.root, output).split(path.sep).join('/'));
-        let current: Buffer | undefined;
-        try { current = await fs.readFile(output); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-        if (current ? !previous || !current.equals(previous) : !!previous) throw new Error(`Destination changed while waiting for a file lock: ${output}`);
+        await assertSafeDestination(project.root, portableRelative(project.root, output));
+        if (changedSince(await readIfExists(output), previous)) throw new Error(`Destination changed while waiting for a file lock: ${output}`);
       }
     }
   }
@@ -118,10 +127,7 @@ export async function commitRestore(result: RestoreResult, destination: string, 
   contents.set('windhawk-amalgamation.json', Buffer.from(JSON.stringify(result.manifest.config, null, 2) + '\n'));
   const existing = new Map<string, Buffer | undefined>();
   for (const [relative, bytes] of contents) {
-    const target = await assertSafeDestination(destination, relative);
-    let previous: Buffer | undefined;
-    try { previous = await fs.readFile(target); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const previous = await readIfExists(await assertSafeDestination(destination, relative));
     if (previous && !previous.equals(bytes) && !overwrite) throw new Error(`Existing destination differs: ${relative}. Preview and approve overwrite, or use a new directory.`);
     existing.set(relative, previous);
   }
@@ -137,10 +143,9 @@ export async function commitRestore(result: RestoreResult, destination: string, 
       await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, bytes, { flag: 'wx' });
     }
     for (const [relative, bytes] of contents) {
-      const target = await assertSafeDestination(destination, relative), before = existing.get(relative);
-      let current: Buffer | undefined;
-      try { current = await fs.readFile(target); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      if (current ? !before || !current.equals(before) : !!before) throw new Error(`Destination changed during recovery: ${relative}`);
+      const target = await assertSafeDestination(destination, relative);
+      const current = await readIfExists(target);
+      if (changedSince(current, existing.get(relative))) throw new Error(`Destination changed during recovery: ${relative}`);
       if (current?.equals(bytes)) continue;
       await fs.mkdir(path.dirname(target), { recursive: true });
       await fs.rename(path.join(stage, relative), target); committed.push(relative);

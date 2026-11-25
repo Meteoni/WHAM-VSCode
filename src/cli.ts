@@ -2,9 +2,9 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { discoverEntries, outputPath } from './config';
+import { discoverEntries, outputPath, portableRelative } from './config';
 import { checksum, generateEntry, restoreSource } from './engine';
-import { commitRestore, initializeProject, inputsUnchanged, loadProject, nodeFiles, writeOutput } from './io';
+import { commitRestore, inputsUnchanged, loadProject, nodeFiles, readIfExists, writeOutput } from './io';
 import { mergeRecoveries, setupProject } from './setup';
 
 /** CLI uses the same engine and explicit output ownership rules as the editor. */
@@ -38,8 +38,7 @@ async function main(): Promise<void> {
     for (const diagnostic of generated.diagnostics) console.error(`${diagnostic.path}:${diagnostic.line + 1}: ${diagnostic.severity}: ${diagnostic.message}`);
     if (!generated.bytes) { process.exitCode = 1; continue; }
     const output = outputPath(project, entry);
-    let existing: Buffer | undefined;
-    try { existing = await fs.readFile(output); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const existing = await readIfExists(output);
     if (command === 'check') {
       if (!existing?.equals(generated.bytes)) { console.error(`Stale or missing: ${output}`); process.exitCode = 1; }
       continue;
@@ -48,7 +47,7 @@ async function main(): Promise<void> {
     if (existing && !owned) {
       try {
         const restored = restoreSource(existing);
-        owned = !restored.conflicts.length && restored.manifest.root === path.relative(project.root, entry).split(path.sep).join('/') &&
+        owned = !restored.conflicts.length && restored.manifest.root === portableRelative(project.root, entry) &&
           [...restored.files.values()].every(candidates => candidates.every(candidate => !candidate.changed));
       } catch { owned = false; }
     }

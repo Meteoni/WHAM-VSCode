@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { isMap, parseAllDocuments } from 'yaml';
-import { assertSafeDestination, initializeProject, writeOutput } from './io';
+import { assertSafeDestination, initializeProject, readIfExists, writeOutput } from './io';
 import { Project, RestoreResult } from './types';
 import { readWindhawkPaths } from './windhawk';
 
@@ -36,8 +36,7 @@ function replaceManagedSection(existing: string | undefined, label: string, valu
 /** Recover applied preferences when opening a project in a different VS Code workspace. */
 export async function readEditorSettings(root: string, saved: EditorSettings = editorDefaults): Promise<EditorSettings> {
   const contents = await Promise.all(['.vscode/settings.json', '.vscode/c_cpp_properties.json', '.clang-format'].map(async file => {
-    try { return await fs.readFile(path.join(root, file), 'utf8'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return ''; }
+    return (await readIfExists(path.join(root, file)))?.toString('utf8') ?? '';
   }));
   const settingsErrors: ParseError[] = [], propertiesErrors: ParseError[] = [];
   const parsedSettings = parse(contents[0], settingsErrors, { allowTrailingComma: true }), parsedProperties = parse(contents[1], propertiesErrors, { allowTrailingComma: true });
@@ -127,8 +126,7 @@ export async function createInitialCommit(project: Project, sourceFiles: string[
 
 export async function appendIgnoreRules(project: Project, rules: string[]): Promise<void> {
   const file = await assertSafeDestination(project.root, '.gitignore');
-  let previous = '';
-  try { previous = await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const previous = (await readIfExists(file))?.toString('utf8') ?? '';
   const lines = new Set(previous.split(/\r?\n/)), missing = rules.filter(rule => !lines.has(rule));
   if (!missing.length) return;
   const newline = previous.includes('\r\n') ? '\r\n' : '\n';
@@ -173,8 +171,7 @@ export async function editorConfiguration(project: Project, input: EditorSetting
   const result = new Map<string, Buffer>();
   /** Missing files read as undefined; callers decide what a fresh file contains. */
   const read = async (relative: string): Promise<string | undefined> => {
-    const file = await assertSafeDestination(project.root, relative);
-    try { return await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    return (await readIfExists(await assertSafeDestination(project.root, relative)))?.toString('utf8');
   };
   /** Missing or blank JSONC files start as an empty object; anything else must be an object. */
   const readJsonObject = async (relative: string): Promise<{ text: string; value: Record<string, any> }> => {
