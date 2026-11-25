@@ -10,7 +10,12 @@ const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === 
 
 /** Read a file, or return undefined when it does not exist. Other errors propagate. */
 export async function readIfExists(file: string): Promise<Buffer | undefined> {
-  try { return await fs.readFile(file); } catch (error) { if (isMissing(error)) return undefined; throw error; }
+  try {
+    return await fs.readFile(file);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
 }
 
 /** True when a file's bytes (undefined = missing) differ from an earlier snapshot. */
@@ -26,22 +31,30 @@ export const nodeFiles: FileAccess = {
     const result: string[] = [];
     const walk = async (current: string) => {
       let entries;
-      try { entries = await fs.readdir(current, { withFileTypes: true }); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+      try {
+        entries = await fs.readdir(current, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw error;
+      }
       for (const entry of entries) {
         const target = path.join(current, entry.name);
         if (entry.isDirectory()) await walk(target);
-        else if (entry.isFile() || entry.isSymbolicLink() && (await fs.stat(target)).isFile()) result.push(target);
+        else if (entry.isFile() || (entry.isSymbolicLink() && (await fs.stat(target)).isFile())) result.push(target);
       }
     };
-    await walk(directory); return result;
+    await walk(directory);
+    return result;
   }
 };
 
 export async function loadProject(root: string): Promise<Project> {
   let config = defaults;
-  try { config = validateConfig(JSON.parse(await fs.readFile(path.join(root, 'windhawk-amalgamation.json'), 'utf8'))); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  try {
+    config = validateConfig(JSON.parse(await fs.readFile(path.join(root, 'windhawk-amalgamation.json'), 'utf8')));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   const canonical = await fs.realpath(root);
   for (const directory of [config.sourceDirectory, config.outputDirectory]) {
     const target = path.resolve(root, directory);
@@ -49,13 +62,18 @@ export async function loadProject(root: string): Promise<Project> {
     while (contained(root, current)) {
       try {
         if ((await fs.lstat(current)).isSymbolicLink()) throw new Error(`Project directory uses a symlink: ${current}`);
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
       if (current === path.resolve(root)) break;
       current = path.dirname(current);
     }
     // Check existing aliases in addition to lexical overlap.
-    try { if (!contained(canonical, await fs.realpath(target))) throw new Error('Project directory escapes its root.'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try {
+      if (!contained(canonical, await fs.realpath(target))) throw new Error('Project directory escapes its root.');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
   return { root: path.resolve(root), config: { ...config } };
 }
@@ -64,15 +82,23 @@ export async function initializeProject(root: string): Promise<Project> {
   const project = await loadProject(root);
   await fs.mkdir(path.join(root, project.config.sourceDirectory), { recursive: true });
   await fs.mkdir(path.join(root, project.config.outputDirectory), { recursive: true });
-  try { await fs.writeFile(path.join(root, 'windhawk-amalgamation.json'), JSON.stringify(project.config, null, 2) + '\n', { flag: 'wx' }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  try {
+    await fs.writeFile(path.join(root, 'windhawk-amalgamation.json'), JSON.stringify(project.config, null, 2) + '\n', {
+      flag: 'wx'
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
   return project;
 }
 
 export async function inputsUnchanged(dependencies: Map<string, string>): Promise<boolean> {
   for (const [file, hash] of dependencies) {
-    try { if (checksum(await fs.readFile(file)) !== hash) return false; }
-    catch { return false; }
+    try {
+      if (checksum(await fs.readFile(file)) !== hash) return false;
+    } catch {
+      return false;
+    }
   }
   return true;
 }
@@ -80,7 +106,8 @@ export async function inputsUnchanged(dependencies: Map<string, string>): Promis
 /** Commit only to ordinary files beneath a trusted root. */
 export async function assertSafeDestination(root: string, relative: string): Promise<string> {
   portablePath(relative);
-  const resolvedRoot = path.resolve(root), target = path.resolve(root, relative);
+  const resolvedRoot = path.resolve(root),
+    target = path.resolve(root, relative);
   if (!contained(resolvedRoot, target)) throw new Error('Destination escapes selected directory.');
   let current = resolvedRoot;
   for (const component of ['', ...relative.split('/')]) {
@@ -88,9 +115,12 @@ export async function assertSafeDestination(root: string, relative: string): Pro
     try {
       const stat = await fs.lstat(current);
       if (stat.isSymbolicLink()) throw new Error(`Destination uses a symlink: ${current}`);
-      if (current !== target && !stat.isDirectory()) throw new Error(`Destination parent is not a directory: ${current}`);
+      if (current !== target && !stat.isDirectory())
+        throw new Error(`Destination parent is not a directory: ${current}`);
       if (current === target && !stat.isFile()) throw new Error(`Destination is not a regular file: ${current}`);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
   return target;
 }
@@ -103,21 +133,35 @@ export async function writeOutput(project: Project, output: string, bytes: Buffe
   try {
     await fs.writeFile(temporary, bytes, { flag: 'wx' });
     for (let attempt = 0; ; attempt++) {
-      try { await fs.rename(temporary, output); break; }
-      catch (error) {
+      try {
+        await fs.rename(temporary, output);
+        break;
+      } catch (error) {
         // Windows readers and indexers can briefly prevent an atomic replacement.
-        if (process.platform !== 'win32' || attempt >= 4 || !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+        if (
+          process.platform !== 'win32' ||
+          attempt >= 4 ||
+          !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
+        )
+          throw error;
         await delay(20 * (attempt + 1));
         await assertSafeDestination(project.root, portableRelative(project.root, output));
-        if (changedSince(await readIfExists(output), previous)) throw new Error(`Destination changed while waiting for a file lock: ${output}`);
+        if (changedSince(await readIfExists(output), previous))
+          throw new Error(`Destination changed while waiting for a file lock: ${output}`);
       }
     }
+  } finally {
+    await fs.rm(temporary, { force: true });
   }
-  finally { await fs.rm(temporary, { force: true }); }
 }
 
 /** Stage an entire recovery and roll back file changes on a failed commit. */
-export async function commitRestore(result: RestoreResult, destination: string, selections = new Map<string, number>(), overwrite = false): Promise<void> {
+export async function commitRestore(
+  result: RestoreResult,
+  destination: string,
+  selections = new Map<string, number>(),
+  overwrite = false
+): Promise<void> {
   const contents = new Map<string, Buffer>();
   for (const [file, candidates] of result.files) {
     const selected = selections.get(file) ?? (candidates.length === 1 ? 0 : undefined);
@@ -128,7 +172,10 @@ export async function commitRestore(result: RestoreResult, destination: string, 
   const existing = new Map<string, Buffer | undefined>();
   for (const [relative, bytes] of contents) {
     const previous = await readIfExists(await assertSafeDestination(destination, relative));
-    if (previous && !previous.equals(bytes) && !overwrite) throw new Error(`Existing destination differs: ${relative}. Preview and approve overwrite, or use a new directory.`);
+    if (previous && !previous.equals(bytes) && !overwrite)
+      throw new Error(
+        `Existing destination differs: ${relative}. Preview and approve overwrite, or use a new directory.`
+      );
     existing.set(relative, previous);
   }
   // Validate the output directory as a parent before staging anything.
@@ -140,22 +187,29 @@ export async function commitRestore(result: RestoreResult, destination: string, 
     await fs.mkdir(stage);
     for (const [relative, bytes] of contents) {
       const target = path.join(stage, relative);
-      await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, bytes, { flag: 'wx' });
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, bytes, { flag: 'wx' });
     }
     for (const [relative, bytes] of contents) {
       const target = await assertSafeDestination(destination, relative);
       const current = await readIfExists(target);
-      if (changedSince(current, existing.get(relative))) throw new Error(`Destination changed during recovery: ${relative}`);
+      if (changedSince(current, existing.get(relative)))
+        throw new Error(`Destination changed during recovery: ${relative}`);
       if (current?.equals(bytes)) continue;
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.rename(path.join(stage, relative), target); committed.push(relative);
+      await fs.rename(path.join(stage, relative), target);
+      committed.push(relative);
     }
     await fs.mkdir(path.join(destination, result.manifest.config.outputDirectory), { recursive: true });
   } catch (error) {
     for (const relative of committed.reverse()) {
-      const before = existing.get(relative), target = path.join(destination, relative);
-      if (before) await fs.writeFile(target, before); else await fs.rm(target, { force: true });
+      const before = existing.get(relative),
+        target = path.join(destination, relative);
+      if (before) await fs.writeFile(target, before);
+      else await fs.rm(target, { force: true });
     }
     throw error;
-  } finally { await fs.rm(stage, { recursive: true, force: true }); }
+  } finally {
+    await fs.rm(stage, { recursive: true, force: true });
+  }
 }

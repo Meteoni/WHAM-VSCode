@@ -3,6 +3,9 @@ test/**
 work/**
 .vscode/**
 tsconfig.json
+.prettierrc.json
+eslint.config.mjs
+.git-blame-ignore-revs
 package-lock.json
 *.zip
 *.vsix

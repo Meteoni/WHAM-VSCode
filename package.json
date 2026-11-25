@@ -29,18 +29,21 @@
     "build": "tsc -p .",
     "build:bridge": "node scripts/build-bridge.cjs",
     "test": "npm run build && node --test test/*.test.cjs",
+    "format": "prettier --write \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
     "package": "vsce package --githubBranch main --baseImagesUrl https://raw.githubusercontent.com/Meteoni/WHAM-VSCode/main",
     "vscode:prepublish": "npm run build && npm run build:bridge"
   },
   "dependencies": {
-    "minimatch": "^10.0.1",
     "jsonc-parser": "^3.3.1",
+    "minimatch": "^10.0.1",
     "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "^3.2.1",
+    "prettier": "3.10.1",
     "typescript": "^5.7.2"
   },
   "contributes": {
