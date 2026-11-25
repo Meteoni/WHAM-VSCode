@@ -8,6 +8,7 @@
 - Keep one separator between `.clang-format` documents, apply WHAM indentation only to C++ sections, add a C++ section when none exists, and initialize an empty `.clang-format`.
 - Stop writing to a disposed sidebar view, and release preview documents when they close.
 - Reload recovered and new projects kept outside the workspace folders in the next session.
+- Projects opened through a symlink, junction, `subst` drive or 8.3 short path now see unsaved edits in their headers, and can create the initial commit.
 
 ## 1.7.1
 

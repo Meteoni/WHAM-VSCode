@@ -38,7 +38,12 @@ test('new Git setup and ignore rules are idempotent and preserve an enclosing re
     await fs.mkdir(child);
     assert.equal((await setupProject(child, { git })).gitInitialized, false);
     await assert.rejects(fs.stat(path.join(child, '.git')), /ENOENT/);
-    assert.equal((await gitStatus(child, git)).root.toLowerCase(), root.split(path.sep).join('/').toLowerCase());
+    // Git reports the canonical path, which differs when TEMP uses 8.3 short names (as on CI runners).
+    const canonicalRoot = await fs.realpath(root);
+    assert.equal(
+      (await gitStatus(child, git)).root.toLowerCase(),
+      canonicalRoot.split(path.sep).join('/').toLowerCase()
+    );
     execFileSync(git, ['-C', root, 'check-ignore', 'output/anything.wh.cpp']);
     for (const file of ['.vscode/settings.json', '.vscode/c_cpp_properties.json', '.clangd'])
       execFileSync(git, ['-C', root, 'check-ignore', file]);

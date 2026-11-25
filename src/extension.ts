@@ -380,13 +380,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const refreshDraft = async (state: ProjectState, entries = [...state.entries.values()]) => {
     if (disposed || state.removed) return;
     const root = state.editor.installationPath;
+    // Draft dependencies are keyed by canonical path (symlinks, junctions, subst drives and
+    // 8.3 names resolved), but editors use the workspace path. Match unsaved buffers by both.
+    const canonicalKey = (file: string) => (process.platform === 'win32' ? file.toLowerCase() : file);
+    const dirtyByCanonical = new Map<string, vscode.TextDocument>();
+    for (const document of vscode.workspace.textDocuments) {
+      if (!document.isDirty || document.uri.scheme !== 'file') continue;
+      try {
+        dirtyByCanonical.set(canonicalKey(await fs.realpath(document.uri.fsPath)), document);
+      } catch {
+        /* A buffer for a file that does not exist on disk is matched by its path only. */
+      }
+    }
     const overlay = {
       ...nodeFiles,
       read: async (file: string) => {
-        const document = vscode.workspace.textDocuments.find(
-          document => document.isDirty && document.uri.scheme === 'file' && sameFile(document.uri.fsPath, file)
-        );
-        return document ? Buffer.from(document.getText()) : nodeFiles.read(file);
+        const document =
+          vscode.workspace.textDocuments.find(
+            document => document.isDirty && document.uri.scheme === 'file' && sameFile(document.uri.fsPath, file)
+          ) ?? dirtyByCanonical.get(canonicalKey(file));
+        return document?.isDirty ? Buffer.from(document.getText()) : nodeFiles.read(file);
       }
     };
     for (const entry of entries) {

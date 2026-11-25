@@ -175,9 +175,12 @@ export async function createInitialCommit(project: Project, sourceFiles: string[
   const repository = (
     await run(git, ['-C', project.root, 'rev-parse', '--show-toplevel'], { windowsHide: true })
   ).stdout.trim();
-  const normalize = (file: string) =>
-    process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
-  if (normalize(repository) !== normalize(project.root))
+  // Git reports the canonical long path; the root may use 8.3 short names or other aliases.
+  const normalize = async (file: string) => {
+    const canonical = await fs.realpath(path.resolve(file));
+    return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+  };
+  if ((await normalize(repository)) !== (await normalize(project.root)))
     throw new Error('Initial commits are limited to the new project repository.');
   let hasCommit = false;
   try {
