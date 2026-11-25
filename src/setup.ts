@@ -520,7 +520,8 @@ export function mergeRecoveries(results: RestoreResult[]): RestoreResult {
       throw new Error(
         'Selected containers have different include/source layouts. Recover them into separate projects.'
       );
-    for (const entry of result.manifest.config.entries) entries.add(entry);
+    // Containers before 1.7.2 escaped `!` as `[!]`, which matches nothing.
+    for (const entry of result.manifest.config.entries) entries.add(entry.replaceAll('[!]', '@(!)'));
     for (const record of result.manifest.files) if (!records.has(record.path)) records.set(record.path, record);
     for (const [file, candidates] of result.files) {
       const combined = files.get(file) ?? [];

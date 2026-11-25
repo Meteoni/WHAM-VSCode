@@ -9,6 +9,8 @@
 - Stop writing to a disposed sidebar view, and release preview documents when they close.
 - Reload recovered and new projects kept outside the workspace folders in the next session.
 - Projects opened through a symlink, junction, `subst` drive or 8.3 short path now see unsaved edits in their headers, and can create the initial commit.
+- Recovered projects keep entries whose file names contain `!`. Recovery also repairs that entry in containers from earlier versions.
+- Update minimatch to 11, resolving a denial-of-service advisory for crafted globs.
 
 ## 1.7.1
 

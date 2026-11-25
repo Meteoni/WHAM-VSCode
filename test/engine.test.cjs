@@ -45,6 +45,23 @@ async function roundTrip(contents, configuration = {}, entry = 'src/mod.cpp') {
   return { ...input, generated, recovered };
 }
 
+test('recovered entry globs match exactly their own file, including glob metacharacters', async () => {
+  const { mergeRecoveries } = require('../dist/setup');
+  for (const name of ['src/a!b.cpp', 'src/!lead.cpp', 'src/x [1] (y) {z} +@.cpp', 'src/plain.cpp']) {
+    const { recovered } = await roundTrip({ [name]: 'int x;\n', 'src/other!.cpp': 'int y;\n' }, {}, name);
+    const replay = fixture({ [name]: 'int x;\n', 'src/other!.cpp': 'int y;\n' }, recovered.manifest.config);
+    assert.deepEqual(
+      await discoverEntries(replay.project, replay.access),
+      [path.join(replay.project.root, name)],
+      name
+    );
+  }
+  // Containers from before 1.7.2 wrote `!` as `[!]`, which matches nothing; recovery repairs it.
+  const legacy = { ...defaults, entries: ['a[!]b.cpp'] };
+  const merged = mergeRecoveries([{ manifest: { config: legacy, files: [] }, files: new Map(), conflicts: [] }]);
+  assert.deepEqual(merged.manifest.config.entries, ['a@(!)b.cpp']);
+});
+
 test('hand-constructed nested v1 container restores exact files', async () => {
   const fixtureRoot = path.join(__dirname, 'fixtures');
   const recovered = restoreSource(await fs.readFile(path.join(fixtureRoot, 'handcrafted.wh.cpp')));

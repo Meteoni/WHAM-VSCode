@@ -17,6 +17,12 @@ const MiB = 1024 * 1024;
 const limits = { sourceBytes: 16 * MiB, containerBytes: 64 * MiB, depth: 64, files: 10000 } as const;
 
 export const checksum = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex');
+/**
+ * A glob matching exactly this path. Brackets make most metacharacters literal, but `[!]`
+ * would open a negated class, so `!` uses the one-character extglob `@(!)`.
+ */
+export const literalGlob = (file: string) =>
+  file.replace(/[*?[\]{}()!+@]/g, character => (character === '!' ? '@(!)' : `[${character}]`));
 /** Synthetic guard that replaces a header's `#pragma once`, stable per file path. */
 const onceMacro = (display: string) => 'WHAM_ONCE_' + checksum(display).slice(0, 24).toUpperCase();
 const utf8 = (bytes: Buffer): string => {
@@ -553,7 +559,7 @@ export async function generateEntry(project: Project, entryPath: string, files: 
     if (result.diagnostics.some(item => item.severity === 'error')) return result;
     const root = portableRelative(project.root, entryPath);
     const rootRelative = path.posix.relative(project.config.sourceDirectory, root);
-    const config = { ...project.config, entries: [rootRelative.replace(/([*?[\]{}()!+@])/g, '[$1]')], exclude: [] };
+    const config = { ...project.config, entries: [literalGlob(rootRelative)], exclude: [] };
     const tail = body && !body.endsWith('\n') ? '\n' : '';
     const manifest: Manifest = {
       type: 'manifest',
