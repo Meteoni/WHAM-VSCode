@@ -35,6 +35,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const projects = new Map<string, ProjectState>();
   const installedOperations = new Map<string, EntryState>();
   let sidebarDetails: { entry: string; controller: ReturnType<typeof createDetailsView> } | undefined;
+  let sidebarReceiver: vscode.Disposable | undefined;
   let sidebarHtml = '';
   let sidebarStateJson = '';
   // Keep layout styles in the initial document when moving between list and details.
@@ -91,6 +92,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   context.subscriptions.push(log, diagnostics, status,
     vscode.workspace.registerTextDocumentContentProvider('wham-preview', { provideTextDocumentContent: uri => previews.get(uri.toString()) ?? '' }));
+  // Each diff/preview gets a fresh URI; keep its text only while the document is open.
+  if (vscode.workspace.onDidCloseTextDocument) context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(document => {
+    if (document.uri.scheme === 'wham-preview') previews.delete(document.uri.toString());
+  }));
   const active = (): ProjectState | undefined => {
     const editorRoot = vscode.window.activeTextEditor?.document.uri.fsPath;
     return projects.get(selectedRoot ?? '') ?? [...projects.values()].find(state => editorRoot && contained(state.project.root, editorRoot)) ?? projects.values().next().value;
@@ -434,10 +439,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     if (!disposed) presentDiagnostics();
   };
-  const addProject = async (root: string) => {
+  // Projects loaded outside the workspace folders are reloaded for this workspace on activation.
+  const persistAdditionalRoots = () => context.workspaceState.update('additionalRoots',
+    [...projects.keys()].filter(root => !vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, root))));
+  /** Returns the loaded state, which may be keyed by an existing root with different casing. */
+  const addProject = async (root: string): Promise<ProjectState> => {
     root = path.resolve(root);
     const loadedRoot = [...projects.keys()].find(previous => sameFile(previous, root));
-    if (loadedRoot) { selectedRoot = loadedRoot; await rememberProject(loadedRoot); publish(); return; }
+    if (loadedRoot) { selectedRoot = loadedRoot; await rememberProject(loadedRoot); publish(); return projects.get(loadedRoot)!; }
     if (!Object.keys(localPreferences.projects).some(key => sameFile(key, root))) {
       // Adopt a usable old installation only if none is selected globally.
       const applied = await readEditorSettings(root);
@@ -461,6 +470,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } }
     catch (error) { state.error = String(error); }
     publish();
+    return state;
   };
   const showDetails = async (state: ProjectState, entry: EntryState) => {
     const data: DetailsData = { installation: state.windhawk ?? { root: state.editor.installationPath, parser: false, cli: false },
@@ -658,9 +668,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     await commitRestore(result, destination, selections, differences.length > 0);
     const setup = await setupProject(destination, { git: gitExecutable() });
-    await addProject(destination); selectedRoot = destination; publish();
-    await configureEditor(projects.get(destination)!);
-    if (initialCommit && setup.gitInitialized) await finishInitialCommit(projects.get(destination)!, [...result.files.keys()]);
+    const recovered = await addProject(destination); selectedRoot = recovered.project.root;
+    await persistAdditionalRoots(); publish();
+    await configureEditor(recovered);
+    if (initialCommit && setup.gitInitialized) await finishInitialCommit(recovered, [...result.files.keys()]);
     if (openProject && !vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, destination))) await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(destination), false);
     else void vscode.window.showInformationMessage(`Recovered ${result.files.size} source files in ${destination}`);
     return true;
@@ -720,10 +731,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await fs.mkdir(root);
       } else if ((await fs.readdir(root)).length) throw new Error('This folder is not empty. Choose Open project.');
     }
-    const setup = await setupProject(root, { git: gitExecutable() }); await addProject(root); selectedRoot = root;
-    await context.workspaceState.update('additionalRoots', [...projects.keys()].filter(root => !vscode.workspace.workspaceFolders?.some(folder => folder.uri.fsPath === root))); publish();
-    await configureEditor(projects.get(root)!);
-    if (initialCommit && setup.gitInitialized) await finishInitialCommit(projects.get(root)!, []);
+    const setup = await setupProject(root, { git: gitExecutable() });
+    const created = await addProject(root); selectedRoot = created.project.root;
+    await persistAdditionalRoots(); publish();
+    await configureEditor(created);
+    if (initialCommit && setup.gitInitialized) await finishInitialCommit(created, []);
     if (openProject && !vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, root))) await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(root), false);
     else void vscode.window.showInformationMessage(`Project ready: ${root}`);
     return true;
@@ -1018,7 +1030,15 @@ ${sidebarStyles}</style></head><body>
         </section>
         </main><script nonce="${nonce}">/* initial sidebar state */</script><script nonce="${nonce}" src="${script}"></script></body></html>`;
       sidebarHtml = view.webview.html;
-      context.subscriptions.push(view.webview.onDidReceiveMessage(async message => {
+      // VS Code resolves a new view after the old one is disposed; route messages to one listener only.
+      sidebarReceiver?.dispose();
+      webviewView.onDidDispose?.(() => {
+        if (view !== webviewView) return;
+        sidebarReceiver?.dispose(); sidebarReceiver = undefined;
+        sidebarDetails?.controller.dispose(); sidebarDetails = undefined;
+        view = undefined;
+      });
+      sidebarReceiver = view.webview.onDidReceiveMessage(async message => {
         try {
           if (!message || typeof message.action !== 'string') return;
           if (sidebarDetails || message.details === true) return;
@@ -1113,7 +1133,7 @@ ${sidebarStyles}</style></head><body>
             default: await runModAction(state, entry, message.action, message.line);
           }
         } catch (error) { log.appendLine(String(error)); await view?.webview.postMessage({ type: 'error', action: message?.action, root: message?.root, message: (error as Error).message }); }
-      }));
+      });
       publish();
     }
   }, { webviewOptions: { retainContextWhenHidden: true } }));
@@ -1121,18 +1141,22 @@ ${sidebarStyles}</style></head><body>
     vscode.workspace.onDidSaveTextDocument(document => changed(document.uri.fsPath)),
     vscode.workspace.onDidChangeTextDocument(event => {
       if (event.document.uri.scheme !== 'file') return;
+      // This fires per keystroke in every open file: only republish for project inputs/outputs.
+      let affected = false;
       for (const state of projects.values()) for (const entry of state.entries.values()) {
         if (sameFile(event.document.uri.fsPath, outputPath(state.project, entry.path))) {
+          affected = true;
           if (event.document.isDirty) { entry.status = 'blocked'; entry.message = 'Output has unsaved edits.'; }
           else scheduleRefresh(state, false, [entry]);
         }
         else if (sameFile(event.document.uri.fsPath, entry.path) || dependsOn(entry, event.document.uri.fsPath)) {
+          affected = true;
           if (event.document.isDirty) entry.status = 'pending';
           entry.compilerDiagnostics = []; scheduleRefresh(state, false, [entry]);
           if (sameFile(event.document.uri.fsPath, entry.path)) entry.metadata = parseMetadata(event.document.getText(), entry.path);
         }
       }
-      presentDiagnostics(); publish();
+      if (affected) { presentDiagnostics(); publish(); }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(event => {
       for (const folder of event.added) if (folder.uri.scheme === 'file') void fs.stat(path.join(folder.uri.fsPath, 'windhawk-amalgamation.json')).then(() => addProject(folder.uri.fsPath)).catch(error => log.appendLine(String(error)));
@@ -1142,7 +1166,7 @@ ${sidebarStyles}</style></head><body>
       }
       publish();
     }),
-    { dispose() { disposed = true; void closeElevationSessions(); sidebarDetails?.controller.dispose(); for (const state of projects.values()) retireProject(state); } }
+    { dispose() { disposed = true; void closeElevationSessions(); sidebarDetails?.controller.dispose(); sidebarReceiver?.dispose(); for (const state of projects.values()) retireProject(state); } }
   );
   if (vscode.window.onDidChangeWindowState) context.subscriptions.push(vscode.window.onDidChangeWindowState(event => { if (event.focused) for (const state of projects.values()) scheduleRefresh(state, true); }));
   for (const folder of vscode.workspace.workspaceFolders ?? []) if (folder.uri.scheme === 'file') {

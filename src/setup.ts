@@ -18,6 +18,21 @@ export interface EditorSettings {
 }
 export const editorDefaults: EditorSettings = { installationPath: '', integration: 'cpp', indentStyle: 'spaces', indentSize: 4 };
 
+type YamlDocument = ReturnType<typeof parseAllDocuments>[number];
+/** clang-format applies a section without Language, or Language: Cpp, to C++ files. */
+const isCppFormatDocument = (document: YamlDocument) =>
+  isMap(document.contents) && (!document.get('Language') || document.get('Language') === 'Cpp');
+
+/** Replace or append a JSON-in-YAML fragment between WHAM begin/end comments. */
+function replaceManagedSection(existing: string | undefined, label: string, value: unknown, damaged: string): string {
+  const begin = `# ${label} begin`, end = `# ${label} end`;
+  const fragment = begin + '\n' + JSON.stringify(value, null, 2) + '\n' + end;
+  const text = existing ?? '', first = text.indexOf(begin), last = text.indexOf(end);
+  if ((first >= 0) !== (last >= 0) || first > last) throw new Error(damaged);
+  if (first >= 0) return text.slice(0, first) + fragment + text.slice(last + end.length);
+  return (text.trim() ? text.trimEnd() + '\n---\n' : '') + fragment + '\n';
+}
+
 /** Recover applied preferences when opening a project in a different VS Code workspace. */
 export async function readEditorSettings(root: string, saved: EditorSettings = editorDefaults): Promise<EditorSettings> {
   const contents = await Promise.all(['.vscode/settings.json', '.vscode/c_cpp_properties.json', '.clang-format'].map(async file => {
@@ -50,7 +65,7 @@ export async function readEditorSettings(root: string, saved: EditorSettings = e
   const cppSettings = settings['[cpp]'] && typeof settings['[cpp]'] === 'object' ? settings['[cpp]'] : {};
   const width = cppSettings['editor.tabSize'] ?? settings['editor.tabSize'];
   const insertSpaces = cppSettings['editor.insertSpaces'] ?? settings['editor.insertSpaces'];
-  const formatDocument = parseAllDocuments(contents[2])[0];
+  const formatDocument = parseAllDocuments(contents[2]).find(isCppFormatDocument);
   const format = formatDocument && !formatDocument.errors.length && isMap(formatDocument.contents) ? formatDocument.toJS() : {};
   const indentSize = format.IndentWidth ?? width;
   if (Number.isInteger(indentSize) && indentSize >= 1 && indentSize <= 16) result.indentSize = indentSize;
@@ -156,40 +171,54 @@ export async function editorConfiguration(project: Project, input: EditorSetting
   if (!input || !['cpp', 'clangd', 'both'].includes(input.integration) || !['spaces', 'tabs'].includes(input.indentStyle) ||
     !Number.isInteger(input.indentSize) || input.indentSize < 1 || input.indentSize > 16 || typeof input.installationPath !== 'string') throw new Error('Invalid editor settings. Indentation size must be 1–16.');
   const result = new Map<string, Buffer>();
-  const read = async (relative: string): Promise<string> => {
+  /** Missing files read as undefined; callers decide what a fresh file contains. */
+  const read = async (relative: string): Promise<string | undefined> => {
     const file = await assertSafeDestination(project.root, relative);
-    try { return await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '{}\n'; throw error; }
+    try { return await fs.readFile(file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  };
+  /** Missing or blank JSONC files start as an empty object; anything else must be an object. */
+  const readJsonObject = async (relative: string): Promise<{ text: string; value: Record<string, any> }> => {
+    const existing = await read(relative);
+    const text = existing?.trim() ? existing : '{}\n';
+    const errors: ParseError[] = [];
+    const value = parse(text, errors, { allowTrailingComma: true });
+    if (errors.length || !value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Existing ${relative} must be a JSON object (comments allowed). Fix it before applying settings.`);
+    return { text, value };
   };
   const edit = (source: string, updates: [string[], unknown][]): string => {
-    const errors: ParseError[] = [];
-    const value = parse(source, errors, { allowTrailingComma: true });
-    if (errors.length || !value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Existing VS Code configuration contains invalid JSON with comments. Fix it before applying settings.');
     for (const [keys, value] of updates) source = applyEdits(source, modify(source, keys, value, { formattingOptions: { insertSpaces: true, tabSize: 2 } }));
     return source;
   };
-  let settings = await read('.vscode/settings.json');
-  const existingSettings = parse(settings);
+  const { text: settingsText, value: existingSettings } = await readJsonObject('.vscode/settings.json');
+  let settings = settingsText;
   const cppSettings = { ...(existingSettings['[cpp]'] ?? {}), 'editor.insertSpaces': input.indentStyle === 'spaces', 'editor.tabSize': input.indentSize, 'editor.detectIndentation': false };
   settings = edit(settings, [[['[cpp]'], cppSettings]]);
   settings = edit(settings, [[['search.exclude'], { ...(existingSettings['search.exclude'] ?? {}), [project.config.outputDirectory]: true }],
     [['files.associations'], { ...(existingSettings['files.associations'] ?? {}), '*.wh.cpp': 'cpp', '*.h': 'cpp' }]]);
   const formatFile = await read('.clang-format');
-  if (formatFile === '{}\n') {
-    result.set('.clang-format', Buffer.from(`BasedOnStyle: Chromium\nIndentWidth: ${input.indentSize}\nTabWidth: ${input.indentSize}\nUseTab: ${input.indentStyle === 'tabs' ? 'Always' : 'Never'}\nCommentPragmas: '^[ \\t]+(@[a-zA-Z]+|WHAM@[0-9]+ )'\n`));
+  const useTab = input.indentStyle === 'tabs' ? 'Always' : 'Never', protect = '^[ \\t]+(@[a-zA-Z]+|WHAM@[0-9]+ )';
+  if (!formatFile?.trim()) {
+    result.set('.clang-format', Buffer.from(`BasedOnStyle: Chromium\nIndentWidth: ${input.indentSize}\nTabWidth: ${input.indentSize}\nUseTab: ${useTab}\nCommentPragmas: '${protect}'\n`));
   } else {
-    // Keep the existing YAML style and all unrelated formatting options.
+    // Keep the existing YAML style, other languages' sections, and unrelated options.
     const documents = parseAllDocuments(formatFile);
-    for (const document of documents) {
-      if (document.errors.length || !isMap(document.contents)) throw new Error('Existing .clang-format is not a valid YAML mapping.');
-      document.set('IndentWidth', input.indentSize); document.set('TabWidth', input.indentSize); document.set('UseTab', input.indentStyle === 'tabs' ? 'Always' : 'Never');
-      if (!document.get('Language') || document.get('Language') === 'Cpp') {
-        const prior = document.get('CommentPragmas');
-        if (prior !== undefined && typeof prior !== 'string') throw new Error('CommentPragmas must be a string.');
-        const protect = '^[ \\t]+(@[a-zA-Z]+|WHAM@[0-9]+ )';
-        if (!prior || !prior.includes('WHAM@')) document.set('CommentPragmas', prior ? `(${prior})|(${protect})` : protect);
-      }
+    if (!Array.isArray(documents) || documents.some(document => document.errors.length || !isMap(document.contents))) throw new Error('Existing .clang-format is not a valid YAML mapping.');
+    const cppDocuments = documents.filter(isCppFormatDocument);
+    for (const document of cppDocuments) {
+      document.set('IndentWidth', input.indentSize); document.set('TabWidth', input.indentSize); document.set('UseTab', useTab);
+      const prior = document.get('CommentPragmas');
+      if (prior !== undefined && typeof prior !== 'string') throw new Error('CommentPragmas must be a string.');
+      if (!prior || !prior.includes('WHAM@')) document.set('CommentPragmas', prior ? `(${prior})|(${protect})` : protect);
     }
-    result.set('.clang-format', Buffer.from(documents.map(document => document.toString()).join('---\n')));
+    // Each document after the first needs exactly one separator; toString() emits
+    // one already when the source had an explicit document start.
+    const sections = documents.map((document, index) => {
+      const text = document.toString();
+      return index && !text.startsWith('---') ? '---\n' + text : text;
+    });
+    // Files with only other languages' sections would otherwise leave C++ unformatted.
+    if (!cppDocuments.length) sections.push(`---\nLanguage: Cpp\nBasedOnStyle: Chromium\nIndentWidth: ${input.indentSize}\nTabWidth: ${input.indentSize}\nUseTab: ${useTab}\nCommentPragmas: '${protect}'\n`);
+    result.set('.clang-format', Buffer.from(sections.join('')));
   }
   if (input.installationPath) {
     const { compilerRoot } = await readWindhawkPaths(input.installationPath);
@@ -199,8 +228,8 @@ export async function editorConfiguration(project: Project, input: EditorSetting
     const includeDirectories = project.config.includeDirectories.map(directory => '${workspaceFolder}/' + directory);
     const defines = ['UNICODE', '_UNICODE', 'WINVER=0x0A00', '_WIN32_WINNT=0x0A00', '_WIN32_IE=0x0A00', 'NTDDI_VERSION=0x0A000008', '__USE_MINGW_ANSI_STDIO=0', 'WH_MOD', 'WH_EDITING'];
     if (input.integration !== 'clangd') {
-      let properties = await read('.vscode/c_cpp_properties.json');
-      const parsed = parse(properties), configurations = parsed.configurations ?? [];
+      let { text: properties, value: parsed } = await readJsonObject('.vscode/c_cpp_properties.json');
+      const configurations = parsed.configurations ?? [];
       if (!Array.isArray(configurations)) throw new Error('c_cpp_properties.configurations must be an array.');
       const windhawk = {
         name: 'Windhawk (WHAM)', compilerPath: forward(compiler), intelliSenseMode: 'windows-clang-x64', cppStandard: 'c++23', cStandard: 'c17',
@@ -219,26 +248,17 @@ export async function editorConfiguration(project: Project, input: EditorSetting
       settings = edit(settings, [[['clangd.path'], forward(clangd)], [['clangd.arguments'], [...argumentsList.filter((item: string) => !item.startsWith('--query-driver=')), '--query-driver=' + forward(compiler)]]]);
       const flags = [...(baselineFlags ? baselineFlags.map(flag => flag === 'windhawk_api.h' ? forward(api) : flag) : ['-xc++', '-std=c++23', '--target=x86_64-w64-mingw32', ...defines.map(define => '-D' + define), '-include', forward(api)]),
         ...project.config.includeDirectories.map(directory => '-I' + forward(path.resolve(project.root, directory))), '-I' + forward(path.join(compilerRoot, 'include'))];
-      // A separate managed fragment keeps an existing .clangd file untouched.
-      const existing = await read('.clangd');
-      const begin = '# WHAM editor configuration begin', end = '# WHAM editor configuration end';
-      const fragment = begin + '\n' + JSON.stringify({ CompileFlags: { Compiler: forward(compiler), Add: flags } }, null, 2) + '\n' + end;
-      const first = existing.indexOf(begin), last = existing.indexOf(end);
-      if ((first >= 0) !== (last >= 0) || first > last) throw new Error('Damaged WHAM section in .clangd.');
-      const updated = first >= 0 ? existing.slice(0, first) + fragment + existing.slice(last + end.length) : (existing === '{}\n' ? '' : existing.trimEnd() + '\n---\n') + fragment + '\n';
-      result.set('.clangd', Buffer.from(updated));
+      // Separate managed fragments keep existing .clangd content untouched.
+      result.set('.clangd', Buffer.from(replaceManagedSection(await read('.clangd'), 'WHAM editor configuration',
+        { CompileFlags: { Compiler: forward(compiler), Add: flags } }, 'Damaged WHAM section in .clangd.')));
       const outputConfig = project.config.outputDirectory + '/.clangd';
-      const existingOutputConfig = await read(outputConfig);
-      const outputBegin = '# WHAM output index configuration begin', outputEnd = '# WHAM output index configuration end';
-      const outputFragment = outputBegin + '\n' + JSON.stringify({ Index: { Background: 'Skip' } }, null, 2) + '\n' + outputEnd;
-      const outputStart = existingOutputConfig.indexOf(outputBegin), outputStop = existingOutputConfig.indexOf(outputEnd);
-      if ((outputStart >= 0) !== (outputStop >= 0) || outputStart > outputStop) throw new Error('Damaged WHAM output index section.');
-      result.set(outputConfig, Buffer.from(outputStart >= 0 ? existingOutputConfig.slice(0, outputStart) + outputFragment + existingOutputConfig.slice(outputStop + outputEnd.length) :
-        (existingOutputConfig === '{}\n' ? '' : existingOutputConfig.trimEnd() + '\n---\n') + outputFragment + '\n'));
+      result.set(outputConfig, Buffer.from(replaceManagedSection(await read(outputConfig), 'WHAM output index configuration',
+        { Index: { Background: 'Skip' } }, 'Damaged WHAM output index section.')));
     }
     settings = edit(settings, [[['C_Cpp.intelliSenseEngine'], input.integration === 'clangd' ? 'disabled' : 'default']]);
     settings = edit(settings, [[['clangd.enable'], input.integration !== 'cpp']]);
-    const extensions = await read('.vscode/extensions.json'), recommendations = parse(extensions).recommendations ?? [];
+    const { text: extensions, value: parsedExtensions } = await readJsonObject('.vscode/extensions.json');
+    const recommendations = parsedExtensions.recommendations ?? [];
     if (!Array.isArray(recommendations)) throw new Error('extensions.recommendations must be an array.');
     const needed = input.integration === 'cpp' ? ['ms-vscode.cpptools'] : input.integration === 'clangd' ? ['llvm-vs-code-extensions.vscode-clangd'] : ['ms-vscode.cpptools', 'llvm-vs-code-extensions.vscode-clangd'];
     result.set('.vscode/extensions.json', Buffer.from(edit(extensions, [[['recommendations'], [...new Set([...recommendations, ...needed])]]])));

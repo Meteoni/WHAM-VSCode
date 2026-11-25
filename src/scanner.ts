@@ -12,6 +12,17 @@ export function scanSource(source: string): { directives: Directive[]; records: 
     } else { offsets.push(index); logical += source[index]; }
   }
   offsets.push(source.length);
+  // Index line starts once; slicing the prefix per token made scanning quadratic.
+  const lineStarts = [0];
+  for (let index = source.indexOf('\n'); index >= 0; index = source.indexOf('\n', index + 1)) lineStarts.push(index + 1);
+  const lineAt = (offset: number) => {
+    let low = 0, high = lineStarts.length - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (lineStarts[middle] <= offset) low = middle; else high = middle - 1;
+    }
+    return low;
+  };
   const directives: Directive[] = [], records: RecoveryComment[] = [];
   const comments: SourceComment[] = [];
   let clean = '', prefixOnly = true, index = 0;
@@ -23,7 +34,7 @@ export function scanSource(source: string): { directives: Directive[]; records: 
       let end = logical.indexOf('\n', index);
       if (end < 0) end = logical.length; else end++;
       const comment = logical.slice(index, end);
-      comments.push({ start: offsets[index], end: offsets[end], text: source.slice(offsets[index], offsets[end]), kind: 'line', line: source.slice(0, offsets[index]).split('\n').length - 1 });
+      comments.push({ start: offsets[index], end: offsets[end], text: source.slice(offsets[index], offsets[end]), kind: 'line', line: lineAt(offsets[index]) });
       if (/^\/\/ WHAM@\d+ /.test(comment)) records.push({ start: offsets[index], end: offsets[end], text: comment.trimEnd() });
       clean += comment.replace(/[^\n]/g, ' '); prefixOnly = comment.endsWith('\n'); index = end; continue;
     }
@@ -31,7 +42,7 @@ export function scanSource(source: string): { directives: Directive[]; records: 
       const close = logical.indexOf('*/', index + 2);
       if (close < 0) throw new Error('Unterminated block comment.');
       const comment = logical.slice(index, close + 2);
-      comments.push({ start: offsets[index], end: offsets[close + 2], text: source.slice(offsets[index], offsets[close + 2]), kind: 'block', line: source.slice(0, offsets[index]).split('\n').length - 1 });
+      comments.push({ start: offsets[index], end: offsets[close + 2], text: source.slice(offsets[index], offsets[close + 2]), kind: 'block', line: lineAt(offsets[index]) });
       clean += comment.replace(/[^\n]/g, ' ');
       if (comment.includes('\n')) prefixOnly = true;
       index = close + 2; continue;
@@ -62,7 +73,7 @@ export function scanSource(source: string): { directives: Directive[]; records: 
         } else tokens += directive[cursor++];
       }
       const match = /^#\s*([A-Za-z_][\w]*)\s*([\s\S]*)$/.exec(tokens.trimEnd());
-      if (match) directives.push({ start: offsets[index], end: offsets[end], line: source.slice(0, offsets[index]).split('\n').length - 1, name: match[1], argument: match[2].trim() });
+      if (match) directives.push({ start: offsets[index], end: offsets[end], line: lineAt(offsets[index]), name: match[1], argument: match[2].trim() });
       clean += tokens; index = end; prefixOnly = directive.endsWith('\n'); continue;
     }
     const raw = /^(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\(/.exec(logical.slice(index));

@@ -62,6 +62,37 @@ test('editor configuration resolves Windhawk APIs and preserves existing JSONC a
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
+test('editor configuration handles blank, null and multi-document existing files', async () => {
+  const { parseAllDocuments } = require('yaml');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-editor-edge-'));
+  const project = { root, config: { ...defaults } }, editor = { installationPath: '', integration: 'cpp', indentStyle: 'tabs', indentSize: 3 };
+  const configure = async files => {
+    await fs.rm(path.join(root, '.vscode'), { recursive: true, force: true }); await fs.rm(path.join(root, '.clang-format'), { force: true });
+    for (const [file, text] of Object.entries(files)) { await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true }); await fs.writeFile(path.join(root, file), text); }
+    return editorConfiguration(project, editor);
+  };
+  const sections = files => parseAllDocuments(files.get('.clang-format').toString()).map(document => document.toJS());
+  try {
+    // Blank files are treated like missing ones instead of crashing on parse results.
+    let files = await configure({ '.vscode/settings.json': '  \n', '.clang-format': '' });
+    assert.equal(parse(files.get('.vscode/settings.json').toString())['[cpp]']['editor.tabSize'], 3);
+    assert.deepEqual(sections(files).map(section => [section.BasedOnStyle, section.IndentWidth, section.UseTab]), [['Chromium', 3, 'Always']]);
+    await assert.rejects(configure({ '.vscode/settings.json': 'null' }), /settings\.json must be a JSON object/);
+    // Every document keeps one separator; only C++ sections receive WHAM indentation.
+    for (const format of ['---\nLanguage: Cpp\nColumnLimit: 90\n---\nLanguage: JavaScript\nIndentWidth: 2\n', 'Language: Cpp\nColumnLimit: 90\n---\nLanguage: JavaScript\nIndentWidth: 2\n']) {
+      files = await configure({ '.clang-format': format });
+      const text = files.get('.clang-format').toString();
+      assert.doesNotMatch(text, /---\n---/);
+      assert.deepEqual(sections(files).map(section => [section.Language, section.ColumnLimit, section.IndentWidth]), [['Cpp', 90, 3], ['JavaScript', undefined, 2]]);
+    }
+    // A file with only other languages gains a C++ section.
+    files = await configure({ '.clang-format': 'Language: JavaScript\nIndentWidth: 2\n' });
+    assert.deepEqual(sections(files).map(section => [section.Language, section.IndentWidth]), [['JavaScript', 2], ['Cpp', 3]]);
+    await fs.writeFile(path.join(root, '.clang-format'), files.get('.clang-format'));
+    assert.equal((await readEditorSettings(root)).indentSize, 3, 'Reading settings uses the C++ section, not the first one');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test('recover multiple mods, deduplicate shared files, retain entries and detect divergent copies', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-multi-restore-')); await fs.mkdir(path.join(root, 'src'), { recursive: true });
   try {

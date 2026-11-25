@@ -98,6 +98,10 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     };
     const project = () => messages.filter(message => message.type === 'state').at(-1)?.projects[0];
     await settle(() => project()?.entries.every(entry => entry.status === 'current'));
+    // Typing in files outside every project must not rebuild diagnostics or the sidebar.
+    const statesBeforeTyping = messages.filter(message => message.type === 'state').length;
+    onChange({ document: { uri: Uri.file(path.join(os.tmpdir(), 'unrelated.cpp')), isDirty: true, getText: () => 'int x;' } });
+    assert.equal(messages.filter(message => message.type === 'state').length, statesBeforeTyping);
     const contributed = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8')).contributes.commands.map(command => command.command);
     assert.deepEqual([...commands.keys()].sort(), contributed.sort()); assert.equal(project().entries.length, 2);
     assert.equal(project().editor.installationPath, path.join(root, 'installation')); assert.equal(project().editor.indentSize, 2); assert.equal(project().editor.indentStyle, 'tabs');
@@ -374,6 +378,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     assert.ok(gitRun('ls-tree', '-r', '--name-only', 'HEAD').includes('src/shared.h'));
     assert.equal(gitRun('status', '--porcelain').trim(), '');
     assert.equal(globalStored.recentProjects[0], recoveredRoot);
+    assert.ok(stored.additionalRoots.includes(recoveredRoot), 'A recovered project kept outside the workspace reloads next session');
     await fs.writeFile(path.join(recoveredRoot, 'user.txt'), 'user staged changes'); gitRun('add', 'user.txt');
     mock.window.showQuickPick = async choices => choices[0]?.label === 'Write reconstructed tree' ? choices[0] : undefined;
     mock.window.showInformationMessage = async (message,options,...choices) => {if(!options?.modal)return;return choices.find(choice=>['Use this folder','Recover files','Skip'].includes(typeof choice==='string'?choice:choice.title));};
@@ -425,6 +430,14 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     await assert.rejects(fs.stat(path.join(plainRoot, '.vscode/settings.json')), /ENOENT/);
     assert.equal(opened.at(-1)[1].fsPath, plainRoot);
     assert.equal(globalStored.recentProjects[0], plainRoot);
+    // A disposed sidebar view is never written to; the next resolved view takes over.
+    let disposeView, staleWrites = 0;
+    const staleWebview = { cspSource: 'test-resource:', asWebviewUri: uri => uri.toString(), postMessage: async () => { staleWrites++; }, onDidReceiveMessage() { return disposable(); } };
+    provider.resolveWebviewView({ webview: staleWebview, onDidDispose(fn) { disposeView = fn; return disposable(); } });
+    disposeView(); staleWrites = 0;
+    Object.defineProperty(staleWebview, 'html', { set() { throw new Error('Webview is disposed'); } });
+    onFolders({ added: [], removed: [] });
+    assert.equal(staleWrites, 0);
     // Retiring a project must cancel both debounces and queued work. Reopening
     // creates a new watcher and resumes generation without resurrecting old work.
     provider.resolveWebviewView({ webview: { cspSource: 'test-resource:', asWebviewUri: uri => uri.toString(), postMessage: async message => { messages.push(message); }, onDidReceiveMessage(fn) { receive = fn; return disposable(); } } });

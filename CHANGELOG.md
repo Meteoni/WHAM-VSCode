@@ -1,5 +1,14 @@
 # Changes
 
+## Unreleased
+
+- Scan C++ sources in linear time. Large, heavily commented files no longer stall typing, metadata parsing, or generation.
+- Republish the sidebar and diagnostics only when an edited document belongs to a project.
+- Editor setup accepts blank or missing `.vscode` JSON files and reports a clear error for non-object JSON.
+- Keep one separator between `.clang-format` documents, apply WHAM indentation only to C++ sections, add a C++ section when none exists, and initialize an empty `.clang-format`.
+- Stop writing to a disposed sidebar view, and release preview documents when they close.
+- Reload recovered and new projects kept outside the workspace folders in the next session.
+
 ## 1.7.1
 
 - Avoid project rescans on ordinary source saves and combine scheduled Draft refreshes with generation.
