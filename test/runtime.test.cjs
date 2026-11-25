@@ -317,8 +317,8 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
       globalStored[key] = value;
     }
   };
-  // The adapter's own modules: extension.js and the generation pipeline it delegates to.
-  const fromAdapter = parent => /dist[\\/](extension|generation)\.js$/.test(parent?.filename ?? '');
+  // The adapter's own modules: extension.js and the pipeline and runtime modules it delegates to.
+  const fromAdapter = parent => /dist[\\/](extension|generation|runtime)\.js$/.test(parent?.filename ?? '');
   const load = Module._load;
   Module._load = function (name, ...args) {
     if (name === 'vscode') return mock;
@@ -364,6 +364,7 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
   try {
     delete require.cache[require.resolve('../dist/extension')];
     delete require.cache[require.resolve('../dist/generation')];
+    delete require.cache[require.resolve('../dist/runtime')];
     extension = require('../dist/extension');
   } finally {
     Module._load = load;

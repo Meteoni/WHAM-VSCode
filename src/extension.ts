@@ -13,7 +13,7 @@ import {
   readIfExists,
   writeOutput
 } from './io';
-import { GenerationResult, Project } from './types';
+import { Project } from './types';
 import { parseMetadata, parseDraftSource } from './metadata';
 import {
   inspectWindhawk,
@@ -23,24 +23,20 @@ import {
   runWindhawkCli,
   runWindhawkProcess,
   readInstalledMod,
-  WindhawkError,
   previewLanguage
 } from './windhawk';
 import { ComputerPreferencesInput, createSidebarRouter, ProjectMessage } from './sidebar';
 import { createGenerationPipeline } from './generation';
+import { createRuntimeOperations } from './runtime';
 import {
-  compileStatus,
   CompiledSnapshot,
   dependsOn,
   EntryState,
-  installedModKey,
   localModId,
   pathKey,
   projectSummary,
   ProjectState,
-  sameFile,
-  setBusy,
-  sourceHash
+  sameFile
 } from './projects';
 import { createDetailsView, DetailsData } from './details';
 import { checkModBuild } from './compiler';
@@ -73,7 +69,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   status.command = 'workbench.view.extension.windhawk';
   status.show();
   const projects = new Map<string, ProjectState>();
-  const installedOperations = new Map<string, EntryState>();
   let sidebarDetails: { entry: string; controller: ReturnType<typeof createDetailsView> } | undefined;
   let sidebarReceiver: vscode.Disposable | undefined;
   let sidebarHtml = '';
@@ -132,15 +127,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       /* Missing files or invalid configuration still need Apply/Review. */
     }
   };
-  // Saved Windhawk source is editable without compilation. Only a successful build
-  // links our submitted snapshot to the compiler-owned library identity.
-  const updateCompileStatus = (state: ProjectState, entry: EntryState) => {
-    if (!entry.runtime) return;
-    const key = installedModKey(state.editor.installationPath, entry.runtime.id);
-    const builds = context.globalState.get<Record<string, CompiledSnapshot>>('compiledSnapshots', {});
-    entry.runtime.compileStatus = compileStatus(entry, builds[key]);
-    entry.runtime.changesPending = entry.runtime.compileStatus === 'uncompiled';
-  };
+  // Compile, install, enable, verify and installed-state polling live in runtime.ts. Hooks
+  // defined further down (saveRelevant, enqueue, refreshDraft) are called lazily.
+  const runtime = createRuntimeOperations({
+    isDisposed: () => disposed,
+    projects: () => projects.values(),
+    log,
+    publish: () => publish(),
+    inform: message => void vscode.window.showInformationMessage(message),
+    showError: message => void vscode.window.showErrorMessage(message),
+    promptCompiler: async () => {
+      const executable = await vscode.window.showInputBox({
+        title: 'Compiler executable',
+        prompt: 'Full executable path; the command runs only when you invoke Verify.'
+      });
+      if (!executable) return undefined;
+      const argumentsJson = await vscode.window.showInputBox({
+        title: 'Compiler arguments (JSON array)',
+        value: JSON.stringify(['-std=c++23', '-fsyntax-only']),
+        prompt: 'Use {file} where the generated file belongs, or it will be appended.'
+      });
+      return argumentsJson ? { executable, argumentsJson } : undefined;
+    },
+    saveRelevant: state => saveRelevant(state),
+    enqueue: (state, targets) => enqueue(state, targets),
+    refreshDraft: (state, entries) => refreshDraft(state, entries),
+    refreshEditorConfiguration: state => refreshEditorConfiguration(state),
+    installationPreferences: root => installationPreferences(root),
+    compiledSnapshots: () => context.globalState.get<Record<string, CompiledSnapshot>>('compiledSnapshots', {}),
+    saveCompiledSnapshots: builds => context.globalState.update('compiledSnapshots', builds),
+    tools: { inspectWindhawk, readInstalledMod, runWindhawkCli, runWindhawkProcess, checkModBuild }
+  });
+  const { updateCompileStatus, refreshRuntime, compileMod, enableMod, verify, stopOperation } = runtime;
   const virtual = (label: string, bytes: Buffer | string): vscode.Uri => {
     const uri = vscode.Uri.from({ scheme: 'wham-preview', path: `/${++previewId}/${path.basename(label)}` });
     previews.set(uri.toString(), bytes.toString());
@@ -205,9 +223,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         error: item.error,
         retained: item.retained,
         entries: [...item.entries.values()].map(entry => {
-          const owner =
-            entry.runtime?.id &&
-            installedOperations.get(installedModKey(item.editor.installationPath, entry.runtime.id));
+          const owner = runtime.operationOwner(item, entry);
           return {
             path: entry.path,
             label: path.relative(path.join(item.project.root, item.project.config.sourceDirectory), entry.path),
@@ -436,58 +452,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     publish();
   };
   // Poll after runtime actions/focus changes, independently of source edits or preview refresh.
-  const refreshRuntime = async (state: ProjectState) => {
-    if (disposed || state.removed) return;
-    const root = state.editor.installationPath;
-    const stamp = root
-      ? (
-          await Promise.all(
-            ['windhawk-cli.exe', 'windhawk-core.dll'].map(async file => {
-              try {
-                const stat = await fs.stat(path.join(root, file));
-                return file + ':' + stat.size + ':' + stat.mtimeMs;
-              } catch {
-                return file + ':missing';
-              }
-            })
-          )
-        ).join('|')
-      : '';
-    if (!state.windhawk || state.windhawk.root !== root || state.windhawkStamp !== stamp) {
-      state.windhawk = await inspectWindhawk(root);
-      state.windhawkStamp = stamp;
-      await refreshDraft(state);
-    }
-    const installation = state.windhawk;
-    const entries = [...state.entries.values()];
-    await Promise.all(
-      entries.map(async entry => {
-        if (!entry.runtime) return;
-        if (!installation.cli || !entry.runtime.id) {
-          entry.installed = undefined;
-          return;
-        }
-        try {
-          entry.installed = await readInstalledMod(root, entry.runtime.id);
-          entry.runtime.error = entry.buildError;
-        } catch (error) {
-          entry.installed = undefined;
-          entry.runtime.error = (error as Error).message;
-        }
-      })
-    );
-    for (const entry of entries) {
-      if (!entry.runtime) continue;
-      entry.runtime.installed = !!entry.installed?.config;
-      entry.runtime.enabled = !!entry.installed?.config && !entry.installed.config.disabled;
-      updateCompileStatus(state, entry);
-      entry.runtime.busy = !!entry.busy;
-      entry.runtime.operation = entry.busy;
-      entry.runtime.stopping = entry.stopping;
-    }
-    await refreshEditorConfiguration(state);
-    publish();
-  };
   const rememberProject = async (root: string) => {
     recentProjects = [root, ...recentProjects.filter(previous => !sameFile(previous, root))].slice(0, 15);
     await context.globalState.update('recentProjects', recentProjects);
@@ -618,201 +582,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       sidebarDetails = { entry: entry.path, controller };
     }
     scheduleRefresh(state, false, [entry]);
-  };
-  const compileMod = async (state: ProjectState, entry: EntryState, testOnly = false) => {
-    if (entry.busy || disposed || state.removed) return;
-    if (
-      !testOnly &&
-      entry.runtime?.id &&
-      installedOperations.has(installedModKey(state.editor.installationPath, entry.runtime.id))
-    ) {
-      void vscode.window.showInformationMessage('This mod already has an operation running.');
-      return;
-    }
-    if (!testOnly && !state.windhawk?.cli) {
-      void vscode.window.showInformationMessage(
-        state.windhawk?.notice ?? 'Select your Windhawk installation in Settings → Extension settings.'
-      );
-      return;
-    }
-    const abort = new AbortController();
-    entry.abort = abort;
-    setBusy(entry, testOnly ? 'test' : 'compile');
-    entry.buildError = undefined;
-    publish();
-    let snapshot: GenerationResult | undefined;
-    let operationKey: string | undefined;
-    try {
-      if (!(await saveRelevant(state))) return;
-      if (abort.signal.aborted) throw new WindhawkError('Compilation stopped.', 'CANCELED');
-      if (testOnly) {
-        snapshot = await generateEntry(state.project, entry.path, nodeFiles);
-        if (!snapshot.bytes || snapshot.diagnostics.some(issue => issue.severity === 'error'))
-          throw new Error(snapshot.diagnostics.map(issue => issue.message).join('\n'));
-        const result = await checkModBuild(
-          state.editor.installationPath,
-          snapshot.bytes.toString(),
-          abort.signal,
-          text => log.append(text),
-          state.windhawk?.version
-        );
-        if (result?.warnings) log.show(true);
-        entry.compilerDiagnostics = [];
-        log.appendLine('Test build passed. No mod was installed.');
-        void vscode.window.showInformationMessage('Test build passed.');
-        return;
-      }
-      await enqueue(state, [entry.path]);
-      if (abort.signal.aborted) throw new WindhawkError('Compilation stopped.', 'CANCELED');
-      if (entry.status !== 'current' || !entry.result?.bytes || !entry.runtime?.id)
-        throw new Error(entry.message || entry.runtime?.error || 'Generate a valid output before compiling.');
-      snapshot = entry.result;
-      const modId = localModId(parseMetadata(snapshot.bytes!.toString(), entry.path).fields.id?.[0]);
-      if (!modId) throw new Error('Add a valid @id before compiling.');
-      const root = state.windhawk!.root,
-        key = installedModKey(root, modId);
-      if (installedOperations.has(key)) {
-        void vscode.window.showInformationMessage('This mod already has an operation running.');
-        return;
-      }
-      operationKey = key;
-      installedOperations.set(key, entry);
-      publish();
-      const installed = await readInstalledMod(root, modId);
-      const installDisabled = !installed.config || installed.config.disabled;
-      log.appendLine(`Compile ${modId} from ${entry.path}`);
-      const result = await runWindhawkCli(
-        root,
-        ['mod', 'install', '--file', '-', ...(installDisabled ? ['--disabled'] : [])],
-        snapshot.bytes!.toString(),
-        text => log.append(text),
-        abort.signal,
-        installationPreferences(root)
-      );
-      if (result.id !== modId) throw new Error('Windhawk returned an unexpected compiled mod ID.');
-      const library = result.config?.libraryFileName;
-      const builds = {
-        ...context.globalState.get<Record<string, CompiledSnapshot>>('compiledSnapshots', {})
-      };
-      if (typeof library === 'string' && library)
-        builds[key] = { sourceHash: sourceHash(snapshot.bytes!.toString()), libraryFileName: library };
-      else delete builds[key]; // An unsupported reply cannot retain a previous build's proof.
-      await context.globalState.update('compiledSnapshots', builds);
-      entry.compilerDiagnostics = [];
-      if (result.warnings) {
-        log.appendLine(String(result.warnings));
-        log.show(true);
-      }
-      log.appendLine('Compilation succeeded.');
-      // Refresh once in finally, including edits made while this snapshot compiled.
-    } catch (error) {
-      if (error instanceof WindhawkError && error.code === 'CANCELED') {
-        log.appendLine('Compilation stopped.');
-        return;
-      }
-      entry.buildError = (error as Error).message;
-      log.appendLine(String(error));
-      const output = error instanceof WindhawkError ? String(error.details?.output ?? error.stderr) : '';
-      if (error instanceof WindhawkError && error.details?.output) log.appendLine(String(error.details.output));
-      log.show(true);
-      entry.compilerDiagnostics = [];
-      if (snapshot?.bytes)
-        for (const match of output.matchAll(
-          /(?:^|\n)([^\n]+\.(?:wh\.)?cpp|<stdin>):(\d+):(\d+):\s*(error|warning):\s*([^\n]+)/g
-        )) {
-          const line = Number(match[2]) - 1,
-            text = snapshot.bytes.toString();
-          let offset = 0;
-          for (let index = 0; index < line; index++) {
-            const next = text.indexOf('\n', offset);
-            if (next < 0) break;
-            offset = next + 1;
-          }
-          const span = snapshot.spans.find(span => span.outputStart <= offset && offset < span.outputEnd);
-          if (span)
-            entry.compilerDiagnostics.push({
-              path: span.path,
-              line: span.sourceLine + text.slice(span.outputStart, offset).split('\n').length - 1,
-              severity: match[4] as 'error' | 'warning',
-              message: match[5].trim()
-            });
-        }
-      void vscode.window.showErrorMessage(entry.buildError);
-    } finally {
-      try {
-        await refreshDraft(state, [entry]);
-        if (!testOnly)
-          for (const project of projects.values()) {
-            if (
-              project === state ||
-              (operationKey &&
-                [...project.entries.values()].some(
-                  peer =>
-                    peer.runtime?.id &&
-                    installedModKey(project.editor.installationPath, peer.runtime.id) === operationKey
-                ))
-            )
-              await refreshRuntime(project);
-          }
-      } finally {
-        if (operationKey && installedOperations.get(operationKey) === entry) installedOperations.delete(operationKey);
-        entry.abort = undefined;
-        setBusy(entry, undefined);
-        publish();
-      }
-    }
-  };
-  const enableMod = async (state: ProjectState, entry: EntryState, enabled: boolean) => {
-    if (entry.busy || disposed || state.removed) return;
-    if (!state.windhawk?.cli || !entry.runtime?.id || !entry.installed?.config) {
-      void vscode.window.showInformationMessage(state.windhawk?.notice ?? 'Compile this mod before enabling it.');
-      return;
-    }
-    const root = state.windhawk.root,
-      modId = entry.runtime.id,
-      key = installedModKey(root, modId);
-    if (installedOperations.has(key)) {
-      void vscode.window.showInformationMessage('This mod already has an operation running.');
-      return;
-    }
-    installedOperations.set(key, entry);
-    const abort = new AbortController();
-    entry.abort = abort;
-    setBusy(entry, enabled ? 'enable' : 'disable');
-    publish();
-    try {
-      const result = await runWindhawkCli(
-        root,
-        ['mod', enabled ? 'enable' : 'disable', modId],
-        undefined,
-        undefined,
-        abort.signal,
-        installationPreferences(root)
-      );
-      if (result?.id !== modId || result.enabled !== enabled)
-        throw new Error('Windhawk returned an unsupported enable/disable response. Update Windhawk.');
-      // The CLI confirms the change. Keep the installed source and Draft untouched.
-      for (const project of projects.values())
-        if (sameFile(project.editor.installationPath, root))
-          for (const peer of project.entries.values()) {
-            if (peer.runtime?.id !== modId || !peer.installed?.config) continue;
-            peer.installed.config.disabled = !result.enabled;
-            peer.runtime.enabled = result.enabled;
-            peer.runtime.error = peer.buildError;
-          }
-    } catch (error) {
-      if (error instanceof WindhawkError && error.code === 'CANCELED') {
-        log.appendLine('Operation canceled.');
-        return;
-      }
-      entry.runtime.error = (error as Error).message;
-      throw error;
-    } finally {
-      if (installedOperations.get(key) === entry) installedOperations.delete(key);
-      entry.abort = undefined;
-      setBusy(entry, undefined);
-      publish();
-    }
   };
   const compare = async (state: ProjectState, entry: EntryState) => {
     const result = await generateEntry(state.project, entry.path, nodeFiles);
@@ -1355,71 +1124,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await update;
     if (state.project.config.generate === 'onSave') await enqueue(state);
   };
-  const verify = async (state: ProjectState, entry: EntryState) => {
-    if (entry.busy || disposed || state.removed) return;
-    let executable: string | undefined,
-      args: string[] = [];
-    const file = outputPath(state.project, entry.path);
-    if (!state.editor.installationPath) {
-      executable = await vscode.window.showInputBox({
-        title: 'Compiler executable',
-        prompt: 'Full executable path; the command runs only when you invoke Verify.'
-      });
-      if (!executable) return;
-      const argumentsJson = await vscode.window.showInputBox({
-        title: 'Compiler arguments (JSON array)',
-        value: JSON.stringify(['-std=c++23', '-fsyntax-only']),
-        prompt: 'Use {file} where the generated file belongs, or it will be appended.'
-      });
-      if (!argumentsJson) return;
-      const argumentsList: unknown = JSON.parse(argumentsJson);
-      if (!Array.isArray(argumentsList) || argumentsList.some(argument => typeof argument !== 'string'))
-        throw new Error('Compiler arguments must be a JSON string array.');
-      args = (argumentsList as string[]).map(argument => argument.replaceAll('{file}', file));
-      if (!(argumentsList as string[]).some(argument => argument.includes('{file}'))) args.push(file);
-    }
-    if (disposed || state.removed) return;
-    log.appendLine('Verify ' + file);
-    const abort = new AbortController();
-    entry.abort = abort;
-    setBusy(entry, 'verify');
-    publish();
-    try {
-      if (state.editor.installationPath) {
-        const source = await fs.readFile(file, 'utf8');
-        const result = await checkModBuild(
-          state.editor.installationPath,
-          source,
-          abort.signal,
-          text => log.append(text),
-          state.windhawk?.version,
-          true
-        );
-        if (result?.warnings) log.show(true);
-      } else {
-        const result = await runWindhawkProcess(executable!, args, undefined, {
-          signal: abort.signal,
-          timeoutMs: 600000,
-          onOutput: text => log.append(text),
-          cwd: state.project.root
-        });
-        if (result.code !== 0) throw new Error('Syntax verification failed (exit ' + result.code + ').');
-        if (/\bwarning:/i.test(result.stderr + '\n' + result.stdout)) log.show(true);
-      }
-      log.appendLine('Syntax verification passed.');
-      void vscode.window.showInformationMessage('Syntax verification passed.');
-    } catch (error) {
-      if (error instanceof WindhawkError && error.code === 'CANCELED') log.appendLine('Verification stopped.');
-      else {
-        log.show(true);
-        throw error;
-      }
-    } finally {
-      entry.abort = undefined;
-      setBusy(entry, undefined);
-      publish();
-    }
-  };
   const runModAction = async (state: ProjectState, entry: EntryState, action: string, line?: number) => {
     if (state.removed || !state.entries.has(entry.path)) throw new Error('This mod is no longer in the project.');
     switch (action) {
@@ -1632,20 +1336,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await postToSidebar({ type: 'editorSaved', root: state.project.root });
     } else if (message.action === 'reviewEditor')
       await postToSidebar({ type: 'editorReviewed', root: state.project.root });
-  };
-  const stopOperation = (state: ProjectState, entry: EntryState) => {
-    // A peer card can stop the build that another project's card started for the same mod.
-    const owner = entry.abort
-      ? entry
-      : entry.runtime?.id
-        ? installedOperations.get(installedModKey(state.editor.installationPath, entry.runtime.id))
-        : undefined;
-    if (owner?.abort && !owner.abort.signal.aborted) {
-      owner.stopping = true;
-      if (owner.runtime) owner.runtime.stopping = true;
-      owner.abort.abort();
-      publish();
-    }
   };
   const refreshGit = async (state: ProjectState) => {
     state.git = await gitStatus(state.project.root, gitExecutable());
