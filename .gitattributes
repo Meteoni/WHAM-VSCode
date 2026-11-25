@@ -1,0 +1,2 @@
+# Fixtures are byte-exact recovery inputs and expected outputs; never convert line endings.
+test/fixtures/** -text
