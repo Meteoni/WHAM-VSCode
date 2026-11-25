@@ -15,22 +15,34 @@ import {
   writeOutput
 } from './io';
 import { GenerationResult, Project } from './types';
-import { ModMetadata, parseMetadata, parseDraftSource } from './metadata';
+import { parseMetadata, parseDraftSource } from './metadata';
 import {
   inspectWindhawk,
   inspectElevation,
   closeElevationSessions,
-  InstalledMod,
   invokeWindhawkCore,
-  ParsedModSource,
   runWindhawkCli,
   runWindhawkProcess,
   readInstalledMod,
   WindhawkError,
-  WindhawkInstallation,
   previewLanguage
 } from './windhawk';
 import { ComputerPreferencesInput, createSidebarRouter, ProjectMessage } from './sidebar';
+import {
+  compileStatus,
+  CompiledSnapshot,
+  dependsOn,
+  EntryState,
+  installedModKey,
+  localModId,
+  ownedOutput,
+  pathKey,
+  projectSummary,
+  ProjectState,
+  sameFile,
+  setBusy,
+  sourceHash
+} from './projects';
 import { createDetailsView, DetailsData } from './details';
 import { checkModBuild } from './compiler';
 import { InstallationPreferences, loadLocalPreferences } from './preferences';
@@ -46,78 +58,12 @@ import {
   setupProject
 } from './setup';
 
-interface EntryState {
-  parsed?: ParsedModSource;
-  parsedHash?: string;
-  draft?: GenerationResult;
-  draftConfig?: string;
-  draftInvalidated?: boolean;
-  installed?: InstalledMod;
-  busy?: 'compile' | 'test' | 'verify' | 'enable' | 'disable';
-  abort?: AbortController;
-  stopping?: boolean;
-  buildError?: string;
-  compilerDiagnostics?: import('./types').Diagnostic[];
-  runtime?: {
-    id?: string;
-    installed: boolean;
-    enabled: boolean;
-    changesPending: boolean;
-    compileStatus?: 'current' | 'uncompiled' | 'unknown';
-    busy: boolean;
-    operation?: 'compile' | 'test' | 'verify' | 'enable' | 'disable';
-    stopping?: boolean;
-    error?: string;
-  };
-  path: string;
-  output: string;
-  status: string;
-  result?: GenerationResult;
-  ownedHash?: string;
-  message?: string;
-  metadata?: ModMetadata;
-}
-interface ProjectState {
-  project: Project;
-  entries: Map<string, EntryState>;
-  queue: Promise<void>;
-  removed?: boolean;
-  subscriptions?: vscode.Disposable[];
-  pending: Set<string>;
-  timer?: NodeJS.Timeout;
-  error?: string;
-  retained: string[];
-  runtimeTimer?: NodeJS.Timeout;
-  runtimePending?: boolean;
-  pollInstalled?: boolean;
-  draftPending: Set<string>;
-  windhawk?: WindhawkInstallation;
-  windhawkStamp?: string;
-  editor: EditorSettings;
-  editorNeedsApply?: boolean;
-  git?: Awaited<ReturnType<typeof gitStatus>>;
-}
-
 /** Fill {{name}} placeholders in a webview template; inserted values are not rescanned. */
 function fillTemplate(template: string, values: Record<string, string>): string {
   return template.replace(/\r\n/g, '\n').replace(/\{\{(\w+)\}\}/g, (_, name: string) => {
     if (!(name in values)) throw new Error(`Missing webview template value: ${name}`);
     return values[name];
   });
-}
-
-/** Windhawk's ID for a locally compiled mod, or undefined when @id is missing or invalid. */
-const localModId = (id: unknown) => (typeof id === 'string' && /^[a-z0-9-]+$/.test(id) ? 'local@' + id : undefined);
-
-/** Keep an entry's operation and the runtime view sent to the sidebar in step. */
-function setBusy(entry: EntryState, operation: EntryState['busy']) {
-  entry.busy = operation;
-  entry.stopping = false;
-  if (entry.runtime) {
-    entry.runtime.busy = !!operation;
-    entry.runtime.operation = operation;
-    entry.runtime.stopping = false;
-  }
 }
 
 /** Bind the shared engine to workspace lifecycle, project queues, and the sidebar. */
@@ -137,7 +83,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const sidebarStyles = await fs.readFile(path.join(context.extensionUri.fsPath, 'media', 'sidebar.css'), 'utf8');
   const sidebarTemplate = await fs.readFile(path.join(context.extensionUri.fsPath, 'media', 'sidebar.html'), 'utf8');
   let pendingSidebarPage: string | undefined;
-  const sourceHash = (source: string) => checksum(Buffer.from(source.replace(/^\uFEFF/, '').replace(/\r\n|\r/g, '\n')));
   const previews = new Map<string, string>();
   let view: vscode.WebviewView | undefined,
     selectedRoot: string | undefined,
@@ -152,11 +97,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.getConfiguration('wham').get<boolean>('createInitialCommit', false);
   const openAfterSetup = () => vscode.workspace.getConfiguration('wham').get<boolean>('openProjectAfterSetup', true);
   const gitExecutable = () => vscode.workspace.getConfiguration('git').get<string>('path') || 'git';
-  const sameFile = (left: string, right: string) =>
-    process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
-  /** Case-insensitive key for installation-scoped state (Windhawk runs on Windows). */
-  const pathKey = (root: string) => path.resolve(root).toLowerCase();
-  const installedModKey = (root: string, id: string | undefined) => JSON.stringify([pathKey(root), id]);
   /** Whether any open editor holds unsaved changes for this file. Generation reads only saved files. */
   const isDirty = (file: string) =>
     vscode.workspace.textDocuments.some(document => document.isDirty && sameFile(document.uri.fsPath, file));
@@ -193,30 +133,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       /* Missing files or invalid configuration still need Apply/Review. */
     }
   };
-  const dependsOn = (entry: EntryState, file: string) =>
-    sameFile(entry.path, file) ||
-    [...((entry.draft ?? entry.result)?.dependencies.keys() ?? [])].some(dependency => sameFile(dependency, file)) ||
-    ((entry.draft ?? entry.result)?.attempts ?? []).some(attempt => sameFile(attempt, file));
   // Saved Windhawk source is editable without compilation. Only a successful build
   // links our submitted snapshot to the compiler-owned library identity.
   const updateCompileStatus = (state: ProjectState, entry: EntryState) => {
     if (!entry.runtime) return;
     const key = installedModKey(state.editor.installationPath, entry.runtime.id);
-    const builds = context.globalState.get<Record<string, { sourceHash: string; libraryFileName: string }>>(
-      'compiledSnapshots',
-      {}
-    );
-    const build = builds[key],
-      library = entry.installed?.config?.libraryFileName;
-    entry.runtime.compileStatus = !entry.installed
-      ? 'unknown'
-      : !entry.installed.config
-        ? 'uncompiled'
-        : !build || !library || build.libraryFileName !== library
-          ? 'unknown'
-          : !entry.draft?.bytes || sourceHash(entry.draft.bytes.toString()) !== build.sourceHash
-            ? 'uncompiled'
-            : 'current';
+    const builds = context.globalState.get<Record<string, CompiledSnapshot>>('compiledSnapshots', {});
+    entry.runtime.compileStatus = compileStatus(entry, builds[key]);
     entry.runtime.changesPending = entry.runtime.compileStatus === 'uncompiled';
   };
   const virtual = (label: string, bytes: Buffer | string): vscode.Uri => {
@@ -259,18 +182,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const publish = () => {
     if (disposed) return;
     const state = active();
-    const statuses = state ? [...state.entries.values()].map(entry => entry.status) : [];
-    status.text =
-      '$(file-code) WHAM: ' +
-      (state?.error
-        ? 'configuration error'
-        : statuses.includes('generating')
-          ? 'generating'
-          : statuses.includes('blocked')
-            ? 'output edits'
-            : statuses.some(value => value !== 'current')
-              ? 'stale'
-              : 'current');
+    status.text = '$(file-code) WHAM: ' + projectSummary(state);
     status.tooltip = state?.project.root ?? 'Initialize a Windhawk project';
     const sidebarState = {
       type: 'state',
@@ -337,19 +249,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
       }
     for (const [file, list] of grouped) diagnostics.set(vscode.Uri.file(file), list);
-  };
-  const ownedOutput = (existing: Buffer, entry: EntryState, state: ProjectState, expected?: Buffer): boolean => {
-    if (expected?.equals(existing) || entry.ownedHash === checksum(existing)) return true;
-    try {
-      const restored = restoreSource(existing);
-      return (
-        restored.manifest.root === portableRelative(state.project.root, entry.path) &&
-        restored.conflicts.length === 0 &&
-        [...restored.files.values()].every(candidates => candidates.every(candidate => !candidate.changed))
-      );
-    } catch {
-      return false;
-    }
   };
   const relevantDirty = (state: ProjectState, entry?: EntryState) =>
     vscode.workspace.textDocuments.filter(
@@ -505,7 +404,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             entry.ownedHash = checksum(existing);
             storedHashes[output] = entry.ownedHash;
             entry.message = entry.draft!.dependencies.size + ' source file(s)';
-          } else if (existing && !ownedOutput(existing, entry, state)) {
+          } else if (existing && !ownedOutput(existing, entry, state.project.root)) {
             entry.status = 'blocked';
             entry.message = 'Output was edited. Compare, restore edits, or explicitly discard them.';
           } else {
@@ -697,7 +596,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
     const existing = await readIfExists(output);
-    if (existing && !force && !ownedOutput(existing, entry, state, result.bytes)) {
+    if (existing && !force && !ownedOutput(existing, entry, state.project.root, result.bytes)) {
       entry.status = 'blocked';
       entry.message = 'Output was edited. Compare, restore edits, or explicitly discard them.';
       return;
@@ -1059,10 +958,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (result.id !== modId) throw new Error('Windhawk returned an unexpected compiled mod ID.');
       const library = result.config?.libraryFileName;
       const builds = {
-        ...context.globalState.get<Record<string, { sourceHash: string; libraryFileName: string }>>(
-          'compiledSnapshots',
-          {}
-        )
+        ...context.globalState.get<Record<string, CompiledSnapshot>>('compiledSnapshots', {})
       };
       if (typeof library === 'string' && library)
         builds[key] = { sourceHash: sourceHash(snapshot.bytes!.toString()), libraryFileName: library };
