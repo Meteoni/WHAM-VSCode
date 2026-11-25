@@ -1,5 +1,9 @@
 # Changes
 
+## Unreleased
+
+- The sidebar updates only the mod cards that changed. Open compile menus, the mod page's More menu, the project list and keyboard focus are no longer reset by updates about other mods; a card that does change keeps its open menu and focused control.
+
 ## 1.7.2
 
 - Scan C++ sources in linear time. Large, heavily commented files no longer stall typing, metadata parsing, or generation.

@@ -204,16 +204,319 @@ for (const [id, section] of [
   });
 }
 
-function render() {
-  projectSelect.replaceChildren();
-  for (const choice of state.projectChoices) {
-    const option = document.createElement('option');
-    option.value = choice.root;
-    option.title = choice.detail;
-    const duplicateName = choice.root && state.projectChoices.filter(other => other.label === choice.label).length > 1;
-    option.textContent = duplicateName ? `${choice.label} — ${choice.detail}` : choice.label;
-    projectSelect.append(option);
+const modActions = {
+  generate: ['Generate', 'Generate a standalone .wh.cpp from saved source files.'],
+  open: ['Source', 'Open this mod’s entry source file.'],
+  output: ['Output', 'Open the generated .wh.cpp file.'],
+  compare: ['Compare', 'Compare existing output with what saved source would generate.'],
+  restore: ['Recover…', 'Recover source files and output edits. Choose a destination and review before writing.'],
+  verify: [
+    'Verify',
+    'Check generated output using its compiler options and declared architectures. View results in the log.'
+  ],
+  discard: [
+    'Discard output edits…',
+    'Discard saved output edits and regenerate from saved source files after confirmation.'
+  ]
+};
+
+/** What a card shows; the card is rebuilt only when this changes. */
+const cardKey = entry =>
+  JSON.stringify([
+    entry.path,
+    entry.label,
+    entry.status,
+    entry.message,
+    entry.dependencies,
+    entry.runtime,
+    entry.metadata?.fields,
+    entry.metadata?.diagnostics.length,
+    navigator.language
+  ]);
+let cards = new Map(); // entry path -> { key, card }
+
+/** Make parent's children exactly `nodes`, leaving nodes already in place untouched. */
+function syncChildren(parent, nodes) {
+  nodes.forEach((node, index) => {
+    const current = parent.children[index];
+    if (current === node) return;
+    if (current && !nodes.includes(current)) current.replaceWith(node);
+    else parent.insertBefore(node, current ?? null);
+  });
+  while (parent.children.length > nodes.length) parent.lastElementChild.remove();
+}
+
+/**
+ * Update the mod cards. Unchanged cards keep their DOM node, so an open compile menu,
+ * focus and hover survive state updates about other mods. A rebuilt card reopens its
+ * compile menu and refocuses the same control.
+ */
+function renderEntries(project) {
+  const entries = document.getElementById('entries');
+  const next = new Map(),
+    nodes = [],
+    restore = [];
+  if (project && !project.entries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = `Add a .cpp file under ${project.config.sourceDirectory}. Each matching file is an independent mod.`;
+    const previous = entries.firstElementChild;
+    nodes.push(previous?.tagName === 'P' && previous.textContent === empty.textContent ? previous : empty);
   }
+  for (const entry of project?.entries || []) {
+    const key = cardKey(entry),
+      cached = cards.get(entry.path);
+    let card = cached?.key === key ? cached.card : undefined;
+    if (!card) {
+      card = createEntryCard(entry);
+      if (cached) restore.push([cached.card, card]);
+    }
+    next.set(entry.path, { key, card });
+    nodes.push(card);
+  }
+  // Capture before the old cards leave the document.
+  const carried = restore.map(([previous, card]) => ({
+    card,
+    menuOpen: !!previous.querySelector('.compile-menu')?.open,
+    focus: previous.contains(document.activeElement)
+      ? document.activeElement.closest('[data-focus]')?.dataset.focus
+      : undefined
+  }));
+  syncChildren(entries, nodes);
+  cards = next;
+  for (const { card, menuOpen, focus } of carried) {
+    if (menuOpen) card.querySelector('.compile-menu').open = true;
+    if (focus) card.querySelector(`[data-focus="${focus}"]`)?.focus();
+  }
+}
+
+/** Build one mod card. Controls carry data-focus so a rebuilt card can restore focus. */
+function createEntryCard(entry) {
+  const card = document.createElement('article');
+  card.className = 'entry';
+  const top = document.createElement('div');
+  top.className = 'entry-heading';
+  const fields = entry.metadata?.fields || {};
+  const name = document.createElement('button');
+  name.dataset.focus = 'details';
+  name.className = 'link';
+  name.textContent = fields['name:' + navigator.language]?.[0] || fields.name?.[0] || entry.label;
+  name.title = 'View mod details';
+  name.addEventListener('click', () => {
+    send('details', { entry: entry.path });
+  });
+  const badge = document.createElement('span');
+  badge.className = 'badge ' + entry.status;
+  badge.textContent = entry.status;
+  badge.title =
+    {
+      current: 'Generated output matches the current saved source.',
+      stale: 'Generated output needs regeneration.',
+      pending: 'Source has unsaved changes or generation is waiting.',
+      generating: 'Generating output.',
+      blocked: 'Output has edits that WHAM will preserve.'
+    }[entry.status] ||
+    entry.message ||
+    entry.status;
+  const badges = document.createElement('div');
+  badges.className = 'entry-badges';
+  if (entry.runtime?.changesPending) {
+    const pending = document.createElement('span');
+    pending.className = 'build-indicator warning compile-needed';
+    pending.setAttribute('role', 'img');
+    pending.setAttribute('aria-label', 'Needs compilation');
+    pending.textContent = '\ueb6d'; // Codicon tools
+    pending.title = entry.runtime?.installed
+      ? 'Source changes need compilation.'
+      : 'This mod has no installed build. Compile it first.';
+    badges.append(pending);
+  }
+  if (entry.runtime?.installed && entry.runtime?.compileStatus === 'unknown') {
+    const unknown = document.createElement('span');
+    unknown.className = 'build-indicator muted';
+    unknown.textContent = '\ueb32'; // Codicon question
+    unknown.setAttribute('role', 'img');
+    unknown.setAttribute('aria-label', 'Build unknown');
+    unknown.title = 'WHAM cannot confirm which source produced this build.';
+    badges.append(unknown);
+  }
+  badges.append(badge);
+  top.append(name, badges);
+  card.append(top);
+  const filename = document.createElement('p');
+  filename.className = 'muted';
+  filename.textContent = entry.label + (fields.version?.[0] ? ` · v${fields.version[0]}` : '');
+  card.append(filename);
+  const sourceInfo = document.createElement('div');
+  sourceInfo.className = 'entry-source-info';
+  const sourceCount = document.createElement('p');
+  sourceCount.textContent = `${entry.dependencies || 0} source file(s)`;
+  sourceInfo.append(sourceCount);
+  const compile = document.createElement('button');
+  compile.dataset.focus = 'compile';
+  compile.className = 'primary';
+  compile.disabled = !!entry.runtime?.busy;
+  const caption = document.createElement('span');
+  caption.className = 'compile-caption';
+  caption.textContent = 'Compile';
+  compile.append(caption);
+  compile.title = 'Generate, compile, and install saved source. Preserve Enabled; the first build starts disabled.';
+  const building = ['compile', 'test', 'verify'].includes(entry.runtime?.operation);
+  if (building) {
+    const progress = document.createElement('span');
+    progress.className = entry.runtime?.stopping ? 'compile-stopping' : 'compile-spinner';
+    progress.setAttribute('aria-hidden', 'true');
+    if (entry.runtime?.stopping) progress.textContent = 'Stopping';
+    compile.append(progress);
+    compile.setAttribute('aria-busy', 'true');
+    const label = entry.runtime?.stopping
+      ? 'Stopping…'
+      : entry.runtime?.operation === 'test'
+        ? 'Testing build…'
+        : entry.runtime?.operation === 'verify'
+          ? 'Verifying…'
+          : 'Compiling…';
+    compile.setAttribute('aria-label', label);
+    compile.title = label;
+  }
+  compile.addEventListener('click', () => send('compile', { entry: entry.path }));
+  const split = document.createElement('div');
+  split.className = 'compile-split';
+  split.append(compile);
+  const menu = document.createElement('details');
+  menu.className = 'more-menu compile-menu';
+  const expander = document.createElement('summary');
+  expander.dataset.focus = 'compile-options';
+  expander.innerHTML =
+    '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 6 4 4 4-4"/></svg>';
+  expander.setAttribute('role', 'button');
+  expander.setAttribute('aria-label', 'Compile options for ' + (fields.name?.[0] || entry.label));
+  expander.setAttribute('aria-haspopup', 'menu');
+  expander.setAttribute('aria-expanded', 'false');
+  expander.title = 'Compile options';
+  const choices = document.createElement('div');
+  choices.className = 'more-actions';
+  choices.setAttribute('role', 'menu');
+  for (const [action, label, tooltip] of [
+    [
+      'testCompile',
+      'Test build',
+      'Compile and link saved source into temporary DLLs without installing or enabling the mod.'
+    ],
+    ['verify', 'Verify syntax', 'Check generated output for each declared architecture using its compiler options.'],
+    ['stopCompile', 'Stop compilation', 'Cancel the current build or verification.']
+  ]) {
+    const button = document.createElement('button');
+    button.dataset.focus = action;
+    button.textContent = label;
+    button.title = tooltip;
+    button.setAttribute('role', 'menuitem');
+    button.hidden = action === 'stopCompile' && !building;
+    button.disabled = action === 'stopCompile' ? !!entry.runtime?.stopping : !!entry.runtime?.busy;
+    button.addEventListener('click', () => {
+      menu.open = false;
+      send(action, { entry: entry.path });
+    });
+    choices.append(button);
+  }
+  menu.append(expander, choices);
+  split.append(menu);
+  menu.addEventListener('toggle', () => {
+    expander.setAttribute('aria-expanded', String(menu.open));
+    if (menu.open) {
+      const bounds = expander.getBoundingClientRect();
+      choices.style.left =
+        Math.max(4, Math.min(bounds.right - choices.offsetWidth, innerWidth - choices.offsetWidth - 4)) + 'px';
+      choices.style.top = Math.max(4, Math.min(bounds.bottom + 4, innerHeight - choices.offsetHeight - 4)) + 'px';
+    }
+  });
+  menu.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      menu.open = false;
+      expander.focus();
+    }
+  });
+  const toggle = document.createElement('label');
+  toggle.className = 'runtime-toggle';
+  const enabled = document.createElement('input');
+  enabled.dataset.focus = 'enable';
+  enabled.type = 'checkbox';
+  enabled.setAttribute('role', 'switch');
+  enabled.setAttribute('aria-label', 'Enable installed ' + (fields.name?.[0] || entry.label));
+  enabled.checked = entry.runtime?.enabled === true;
+  enabled.disabled = !entry.runtime?.installed || !!entry.runtime?.busy;
+  toggle.title = entry.runtime?.installed
+    ? 'Enable or disable the installed build. Draft edits need compilation first.'
+    : 'Compile this mod before enabling it.';
+  enabled.addEventListener('change', () => {
+    send('enable', { entry: entry.path, enabled: enabled.checked });
+    enabled.checked = entry.runtime?.enabled === true;
+  });
+  toggle.append(
+    document.createTextNode(
+      entry.runtime?.operation === 'enable'
+        ? 'Enabling…'
+        : entry.runtime?.operation === 'disable'
+          ? 'Disabling…'
+          : entry.runtime?.enabled
+            ? 'Enabled'
+            : 'Disabled'
+    ),
+    enabled
+  );
+  sourceInfo.append(toggle);
+  card.append(sourceInfo);
+
+  if (entry.runtime?.error) {
+    const error = document.createElement('p');
+    error.className = 'warning';
+    error.textContent = entry.runtime.error;
+    card.append(error);
+  }
+  if (entry.message && !/^\d+ source file\(s\)$/.test(entry.message)) {
+    const message = document.createElement('p');
+    message.textContent = entry.message;
+    card.append(message);
+  }
+  if (entry.metadata?.diagnostics.length) {
+    const warning = document.createElement('p');
+    warning.className = 'warning';
+    warning.textContent = `${entry.metadata.diagnostics.length} metadata warning(s) · View details`;
+    card.append(warning);
+  }
+  const buttons = document.createElement('div');
+  buttons.className = 'toolbar entry-actions';
+  for (const action of ['generate', 'open']) {
+    const [label, tooltip] = modActions[action];
+    const button = document.createElement('button');
+    button.dataset.focus = action;
+    button.textContent = label;
+    button.title = tooltip;
+    button.setAttribute('aria-description', tooltip);
+    button.addEventListener('click', () => send(action, { entry: entry.path }));
+    buttons.append(button);
+  }
+  buttons.append(split);
+  card.append(buttons);
+  return card;
+}
+
+function render() {
+  const choicesKey = JSON.stringify(state.projectChoices);
+  if (projectSelect.dataset.choices !== choicesKey) {
+    projectSelect.dataset.choices = choicesKey;
+    projectSelect.replaceChildren();
+  }
+  if (!projectSelect.options.length)
+    for (const choice of state.projectChoices) {
+      const option = document.createElement('option');
+      option.value = choice.root;
+      option.title = choice.detail;
+      const duplicateName =
+        choice.root && state.projectChoices.filter(other => other.label === choice.label).length > 1;
+      option.textContent = duplicateName ? `${choice.label} — ${choice.detail}` : choice.label;
+      projectSelect.append(option);
+    }
   const project = state.projects.find(project => project.root === currentRoot) || state.projects[0];
   currentRoot = project?.root;
   projectSelect.value = currentRoot || '';
@@ -267,232 +570,7 @@ function render() {
   document.getElementById('settings-git-status').textContent = gitText;
   document.getElementById('count').textContent = String(project?.entries.length || 0);
   document.querySelector('[data-action="generateAll"]').disabled = !project?.entries.length || !!project?.error;
-  const modActions = {
-    generate: ['Generate', 'Generate a standalone .wh.cpp from saved source files.'],
-    open: ['Source', 'Open this mod’s entry source file.'],
-    output: ['Output', 'Open the generated .wh.cpp file.'],
-    compare: ['Compare', 'Compare existing output with what saved source would generate.'],
-    restore: ['Recover…', 'Recover source files and output edits. Choose a destination and review before writing.'],
-    verify: [
-      'Verify',
-      'Check generated output using its compiler options and declared architectures. View results in the log.'
-    ],
-    discard: [
-      'Discard output edits…',
-      'Discard saved output edits and regenerate from saved source files after confirmation.'
-    ]
-  };
-  const entries = document.getElementById('entries');
-  entries.replaceChildren();
-  if (project && !project.entries.length) {
-    const empty = document.createElement('p');
-    empty.className = 'muted';
-    empty.textContent = `Add a .cpp file under ${project.config.sourceDirectory}. Each matching file is an independent mod.`;
-    entries.append(empty);
-  }
-  for (const entry of project?.entries || []) {
-    const card = document.createElement('article');
-    card.className = 'entry';
-    const top = document.createElement('div');
-    top.className = 'entry-heading';
-    const fields = entry.metadata?.fields || {};
-    const name = document.createElement('button');
-    name.className = 'link';
-    name.textContent = fields['name:' + navigator.language]?.[0] || fields.name?.[0] || entry.label;
-    name.title = 'View mod details';
-    name.addEventListener('click', () => {
-      send('details', { entry: entry.path });
-    });
-    const badge = document.createElement('span');
-    badge.className = 'badge ' + entry.status;
-    badge.textContent = entry.status;
-    badge.title =
-      {
-        current: 'Generated output matches the current saved source.',
-        stale: 'Generated output needs regeneration.',
-        pending: 'Source has unsaved changes or generation is waiting.',
-        generating: 'Generating output.',
-        blocked: 'Output has edits that WHAM will preserve.'
-      }[entry.status] ||
-      entry.message ||
-      entry.status;
-    const badges = document.createElement('div');
-    badges.className = 'entry-badges';
-    if (entry.runtime?.changesPending) {
-      const pending = document.createElement('span');
-      pending.className = 'build-indicator warning compile-needed';
-      pending.setAttribute('role', 'img');
-      pending.setAttribute('aria-label', 'Needs compilation');
-      pending.textContent = '\ueb6d'; // Codicon tools
-      pending.title = entry.runtime?.installed
-        ? 'Source changes need compilation.'
-        : 'This mod has no installed build. Compile it first.';
-      badges.append(pending);
-    }
-    if (entry.runtime?.installed && entry.runtime?.compileStatus === 'unknown') {
-      const unknown = document.createElement('span');
-      unknown.className = 'build-indicator muted';
-      unknown.textContent = '\ueb32'; // Codicon question
-      unknown.setAttribute('role', 'img');
-      unknown.setAttribute('aria-label', 'Build unknown');
-      unknown.title = 'WHAM cannot confirm which source produced this build.';
-      badges.append(unknown);
-    }
-    badges.append(badge);
-    top.append(name, badges);
-    card.append(top);
-    const filename = document.createElement('p');
-    filename.className = 'muted';
-    filename.textContent = entry.label + (fields.version?.[0] ? ` · v${fields.version[0]}` : '');
-    card.append(filename);
-    const sourceInfo = document.createElement('div');
-    sourceInfo.className = 'entry-source-info';
-    const sourceCount = document.createElement('p');
-    sourceCount.textContent = `${entry.dependencies || 0} source file(s)`;
-    sourceInfo.append(sourceCount);
-    const compile = document.createElement('button');
-    compile.className = 'primary';
-    compile.disabled = !!entry.runtime?.busy;
-    const caption = document.createElement('span');
-    caption.className = 'compile-caption';
-    caption.textContent = 'Compile';
-    compile.append(caption);
-    compile.title = 'Generate, compile, and install saved source. Preserve Enabled; the first build starts disabled.';
-    const building = ['compile', 'test', 'verify'].includes(entry.runtime?.operation);
-    if (building) {
-      const progress = document.createElement('span');
-      progress.className = entry.runtime?.stopping ? 'compile-stopping' : 'compile-spinner';
-      progress.setAttribute('aria-hidden', 'true');
-      if (entry.runtime?.stopping) progress.textContent = 'Stopping';
-      compile.append(progress);
-      compile.setAttribute('aria-busy', 'true');
-      const label = entry.runtime?.stopping
-        ? 'Stopping…'
-        : entry.runtime?.operation === 'test'
-          ? 'Testing build…'
-          : entry.runtime?.operation === 'verify'
-            ? 'Verifying…'
-            : 'Compiling…';
-      compile.setAttribute('aria-label', label);
-      compile.title = label;
-    }
-    compile.addEventListener('click', () => send('compile', { entry: entry.path }));
-    const split = document.createElement('div');
-    split.className = 'compile-split';
-    split.append(compile);
-    const menu = document.createElement('details');
-    menu.className = 'more-menu compile-menu';
-    const expander = document.createElement('summary');
-    expander.innerHTML =
-      '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 6 4 4 4-4"/></svg>';
-    expander.setAttribute('role', 'button');
-    expander.setAttribute('aria-label', 'Compile options for ' + (fields.name?.[0] || entry.label));
-    expander.setAttribute('aria-haspopup', 'menu');
-    expander.setAttribute('aria-expanded', 'false');
-    expander.title = 'Compile options';
-    const choices = document.createElement('div');
-    choices.className = 'more-actions';
-    choices.setAttribute('role', 'menu');
-    for (const [action, label, tooltip] of [
-      [
-        'testCompile',
-        'Test build',
-        'Compile and link saved source into temporary DLLs without installing or enabling the mod.'
-      ],
-      ['verify', 'Verify syntax', 'Check generated output for each declared architecture using its compiler options.'],
-      ['stopCompile', 'Stop compilation', 'Cancel the current build or verification.']
-    ]) {
-      const button = document.createElement('button');
-      button.textContent = label;
-      button.title = tooltip;
-      button.setAttribute('role', 'menuitem');
-      button.hidden = action === 'stopCompile' && !building;
-      button.disabled = action === 'stopCompile' ? !!entry.runtime?.stopping : !!entry.runtime?.busy;
-      button.addEventListener('click', () => {
-        menu.open = false;
-        send(action, { entry: entry.path });
-      });
-      choices.append(button);
-    }
-    menu.append(expander, choices);
-    split.append(menu);
-    menu.addEventListener('toggle', () => {
-      expander.setAttribute('aria-expanded', String(menu.open));
-      if (menu.open) {
-        const bounds = expander.getBoundingClientRect();
-        choices.style.left =
-          Math.max(4, Math.min(bounds.right - choices.offsetWidth, innerWidth - choices.offsetWidth - 4)) + 'px';
-        choices.style.top = Math.max(4, Math.min(bounds.bottom + 4, innerHeight - choices.offsetHeight - 4)) + 'px';
-      }
-    });
-    menu.addEventListener('keydown', event => {
-      if (event.key === 'Escape') {
-        menu.open = false;
-        expander.focus();
-      }
-    });
-    const toggle = document.createElement('label');
-    toggle.className = 'runtime-toggle';
-    const enabled = document.createElement('input');
-    enabled.type = 'checkbox';
-    enabled.setAttribute('role', 'switch');
-    enabled.setAttribute('aria-label', 'Enable installed ' + (fields.name?.[0] || entry.label));
-    enabled.checked = entry.runtime?.enabled === true;
-    enabled.disabled = !entry.runtime?.installed || !!entry.runtime?.busy;
-    toggle.title = entry.runtime?.installed
-      ? 'Enable or disable the installed build. Draft edits need compilation first.'
-      : 'Compile this mod before enabling it.';
-    enabled.addEventListener('change', () => {
-      send('enable', { entry: entry.path, enabled: enabled.checked });
-      enabled.checked = entry.runtime?.enabled === true;
-    });
-    toggle.append(
-      document.createTextNode(
-        entry.runtime?.operation === 'enable'
-          ? 'Enabling…'
-          : entry.runtime?.operation === 'disable'
-            ? 'Disabling…'
-            : entry.runtime?.enabled
-              ? 'Enabled'
-              : 'Disabled'
-      ),
-      enabled
-    );
-    sourceInfo.append(toggle);
-    card.append(sourceInfo);
-
-    if (entry.runtime?.error) {
-      const error = document.createElement('p');
-      error.className = 'warning';
-      error.textContent = entry.runtime.error;
-      card.append(error);
-    }
-    if (entry.message && !/^\d+ source file\(s\)$/.test(entry.message)) {
-      const message = document.createElement('p');
-      message.textContent = entry.message;
-      card.append(message);
-    }
-    if (entry.metadata?.diagnostics.length) {
-      const warning = document.createElement('p');
-      warning.className = 'warning';
-      warning.textContent = `${entry.metadata.diagnostics.length} metadata warning(s) · View details`;
-      card.append(warning);
-    }
-    const buttons = document.createElement('div');
-    buttons.className = 'toolbar entry-actions';
-    for (const action of ['generate', 'open']) {
-      const [label, tooltip] = modActions[action];
-      const button = document.createElement('button');
-      button.textContent = label;
-      button.title = tooltip;
-      button.setAttribute('aria-description', tooltip);
-      button.addEventListener('click', () => send(action, { entry: entry.path }));
-      buttons.append(button);
-    }
-    buttons.append(split);
-    card.append(buttons);
-    entries.append(card);
-  }
+  renderEntries(project);
   if (selectedMod) {
     const metadata = selectedMod.metadata,
       fields = metadata?.fields || {};
@@ -500,56 +578,60 @@ function render() {
       fields['name:' + navigator.language]?.[0] || fields.name?.[0] || selectedMod.label;
     document.getElementById('mod-file').textContent = selectedMod.label;
     const actions = document.getElementById('mod-actions');
-    actions.replaceChildren();
-    const more = document.createElement('details');
-    more.className = 'more-menu';
-    const summary = document.createElement('summary');
-    summary.textContent = '...';
-    summary.title = 'More actions';
-    summary.setAttribute('aria-label', 'More actions');
-    summary.setAttribute('role', 'button');
-    summary.setAttribute('aria-haspopup', 'menu');
-    more.append(summary);
-    for (const [index, group] of [
-      ['generate', 'open', 'output'],
-      ['compare', 'restore', 'verify', ...(selectedMod.status === 'blocked' ? ['discard'] : [])]
-    ].entries()) {
-      const buttons = document.createElement('div');
-      buttons.className = index === 0 ? 'toolbar' : 'more-actions';
-      buttons.setAttribute('role', index === 0 ? 'group' : 'menu');
-      buttons.setAttribute('aria-label', index === 0 ? 'Mod actions' : 'Output actions');
-      for (const action of group) {
-        const [label, tooltip] = modActions[action];
-        const button = document.createElement('button');
-        button.textContent = label;
-        button.title = tooltip;
-        button.setAttribute('aria-description', tooltip);
-        button.className = action === 'generate' ? 'primary' : action === 'discard' ? 'danger' : '';
-        if (index === 1) button.setAttribute('role', 'menuitem');
-        button.addEventListener('click', () => {
+    const actionsKey = JSON.stringify([selectedMod.path, selectedMod.status === 'blocked']);
+    if (actions.dataset.key !== actionsKey) {
+      actions.dataset.key = actionsKey;
+      actions.replaceChildren();
+      const more = document.createElement('details');
+      more.className = 'more-menu';
+      const summary = document.createElement('summary');
+      summary.textContent = '...';
+      summary.title = 'More actions';
+      summary.setAttribute('aria-label', 'More actions');
+      summary.setAttribute('role', 'button');
+      summary.setAttribute('aria-haspopup', 'menu');
+      more.append(summary);
+      for (const [index, group] of [
+        ['generate', 'open', 'output'],
+        ['compare', 'restore', 'verify', ...(selectedMod.status === 'blocked' ? ['discard'] : [])]
+      ].entries()) {
+        const buttons = document.createElement('div');
+        buttons.className = index === 0 ? 'toolbar' : 'more-actions';
+        buttons.setAttribute('role', index === 0 ? 'group' : 'menu');
+        buttons.setAttribute('aria-label', index === 0 ? 'Mod actions' : 'Output actions');
+        for (const action of group) {
+          const [label, tooltip] = modActions[action];
+          const button = document.createElement('button');
+          button.textContent = label;
+          button.title = tooltip;
+          button.setAttribute('aria-description', tooltip);
+          button.className = action === 'generate' ? 'primary' : action === 'discard' ? 'danger' : '';
+          if (index === 1) button.setAttribute('role', 'menuitem');
+          button.addEventListener('click', () => {
+            more.open = false;
+            send(action, { entry: selectedMod.path });
+          });
+          buttons.append(button);
+        }
+        if (index === 0) actions.append(buttons);
+        else more.append(buttons);
+      }
+      actions.append(more);
+      more.addEventListener('toggle', () => {
+        if (more.open) {
+          const menu = more.querySelector('[role="menu"]'),
+            bounds = summary.getBoundingClientRect();
+          menu.style.left = Math.max(4, Math.min(bounds.left, innerWidth - menu.offsetWidth - 4)) + 'px';
+          menu.style.top = Math.max(4, Math.min(bounds.bottom + 4, innerHeight - menu.offsetHeight - 4)) + 'px';
+        }
+      });
+      more.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
           more.open = false;
-          send(action, { entry: selectedMod.path });
-        });
-        buttons.append(button);
-      }
-      if (index === 0) actions.append(buttons);
-      else more.append(buttons);
+          summary.focus();
+        }
+      });
     }
-    actions.append(more);
-    more.addEventListener('toggle', () => {
-      if (more.open) {
-        const menu = more.querySelector('[role="menu"]'),
-          bounds = summary.getBoundingClientRect();
-        menu.style.left = Math.max(4, Math.min(bounds.left, innerWidth - menu.offsetWidth - 4)) + 'px';
-        menu.style.top = Math.max(4, Math.min(bounds.bottom + 4, innerHeight - menu.offsetHeight - 4)) + 'px';
-      }
-    });
-    more.addEventListener('keydown', event => {
-      if (event.key === 'Escape') {
-        more.open = false;
-        summary.focus();
-      }
-    });
     const details = document.getElementById('metadata-fields');
     details.replaceChildren();
     for (const [key, values] of Object.entries(fields)) {
