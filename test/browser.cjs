@@ -72,11 +72,10 @@ const { parse } = require('jsonc-parser');
     const page = await browser.newPage({ viewport: { width: 380, height: 900 } });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    const code = await fs.readFile('src/extension.ts', 'utf8');
-    const template = /view\.webview\.html = `([\s\S]*?)`;/m.exec(code)[1];
+    const template = (await fs.readFile('media/sidebar.html', 'utf8')).replace(/\r\n/g, '\n');
     const html = template
-      .replaceAll('${view.webview.cspSource}', 'file:')
-      .replaceAll('${nonce}', 'testnonce')
+      .replaceAll('{{cspSource}}', 'file:')
+      .replaceAll('{{nonce}}', 'testnonce')
       .replace('<head>', '<head><style nonce="testnonce">@layer vscode-default { body { padding: 0 20px; } }</style>')
       // VS Code injects these scrollbar dimensions into every webview.
       .replace(
@@ -84,11 +83,11 @@ const { parse } = require('jsonc-parser');
         `<link rel="stylesheet" href="${pathToFileURL(path.resolve('work/webview-scrollbars.css')).href}"></head>`
       )
       .replaceAll(
-        '${iconFont}',
+        '{{iconFont}}',
         pathToFileURL(path.resolve('media/windhawk-renderer/codicon.edde7c4363c6d735a416.ttf')).href
       )
-      .replaceAll('${sidebarStyles}', await fs.readFile('media/sidebar.css', 'utf8'))
-      .replaceAll('${script}', pathToFileURL(path.resolve('media/sidebar.js')).href);
+      .replaceAll('{{sidebarStyles}}', await fs.readFile('media/sidebar.css', 'utf8'))
+      .replaceAll('{{script}}', pathToFileURL(path.resolve('media/sidebar.js')).href);
     const root = 'C:\\Projects\\Windhawk';
     const config = {
       formatVersion: 1,

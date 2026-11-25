@@ -1,0 +1,72 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src {{cspSource}}; style-src {{cspSource}} 'nonce-{{nonce}}'; script-src 'nonce-{{nonce}}';"><style nonce="{{nonce}}">@font-face { font-family: wham-codicon; src: url("{{iconFont}}") format("truetype"); font-display: block; }
+{{sidebarStyles}}</style></head><body>
+        <nav class="main-navigation" aria-label="Main navigation"><button data-page="project">Project</button><button data-page="settings">Settings</button><button data-page="setup">Setup</button></nav><main id="wham-pages">
+        <div id="error" role="alert"></div>
+        <section id="page-setup" hidden>
+          <h1>Set up your project</h1><p class="muted">Work in separate source files. Generate standalone mods with recoverable source.</p>
+          <div class="setup-options">
+            <button data-mode="Create a new project"><strong>New project</strong><span>Choose an empty folder or create a named folder. WHAM sets up src, output, and Git.</span></button>
+            <button data-mode="Open an existing project"><strong>Existing project</strong><span>Select your source project or reopen one from the recent projects list.</span></button>
+            <button data-mode="Recover one or more .wh.cpp files"><strong>Recover mods</strong><span>Reconstruct a project from one or more WHAM outputs, including shared headers.</span></button>
+          </div>
+          <label class="checkbox"><input id="open-after-setup" type="checkbox" checked> Open project after setup</label>
+          <p class="muted">Opening the folder activates its C++ configuration in this window. VS Code handles any unsaved files.</p>
+          <label class="checkbox"><input id="initial-commit" type="checkbox"> Create initial Git commit</label>
+          <p class="muted">For new and recovered projects when WHAM creates the repository. Uses your existing Git name and email.</p>
+          <p id="setup-status" role="status"></p>
+        </section>
+        <section id="page-project" hidden>
+          <div class="project-heading"><label for="project">Active project</label><button data-action="openFolder" class="folder-button" title="Open project folder in VS Code." aria-label="Open project folder in VS Code"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M1.5 5.5V3h4l2 2h6v2M2 7h13l-2.5 6h-11z"/></svg>Open</button></div><select id="project"></select>
+          <details class="project-location"><summary>Project folder</summary><p id="root" class="muted"></p></details>
+          <p id="folder-status" class="muted"></p><p id="git-status" class="muted"></p>
+          <div id="notice" role="status"></div>
+          <div class="mods-heading"><h2>Mods <span id="count"></span></h2><div class="toolbar"><button data-action="logs" class="log-button" title="Show WHAM log" aria-label="Show WHAM log"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 1.5h7l3 3v10H3zM10 1.5v3h3M5 7h6M5 10h6M5 12h4"/></svg></button><button data-action="generateAll">Generate all</button></div></div><div id="entries"></div>
+        </section>
+        <section id="page-mod" hidden>
+          <button data-page="project" class="link">← All mods</button>
+          <h1 id="mod-name"></h1><p id="mod-file" class="muted"></p><div id="mod-actions"></div>
+          <div id="metadata-issues" role="status"></div>
+          <h2>Metadata</h2><dl id="metadata-fields"></dl><button id="edit-metadata">Edit metadata in source</button>
+          <section id="readme-section"><h2>Readme</h2><pre id="readme"></pre><button id="edit-readme">Edit readme in source</button></section>
+          <section id="mod-settings-section"><h2 id="mod-settings-title">Mod settings</h2><pre id="mod-settings"></pre><button id="edit-mod-settings">Edit settings in source</button></section>
+        </section>
+        <section id="page-settings" hidden>
+          <nav class="settings-scope" aria-label="Settings scope"><button data-settings-scope="project">Project</button><button data-settings-scope="extension">Extension</button></nav>
+          <p id="settings-project" class="muted"></p>
+          <nav id="project-settings-navigation" aria-label="Project settings navigation"><button data-settings="editor">Editor</button><button data-settings="generation">Generation</button><button data-settings="git">Git</button></nav>
+          <div id="computer-slot"></div>
+          <form id="computer-config" hidden>
+            <p class="muted">These settings apply to all projects on this computer.</p>
+            <label>Windhawk installation<input name="installationPath" placeholder="Folder containing windhawk.ini"></label>
+            <div class="toolbar"><button type="button" data-action="browseComputerInstallation">Browse / detect</button></div>
+            <label>Elevation method<select name="elevation"><option value="none">None</option><option value="sudo">Windows sudo</option><option value="gsudo">gsudo</option></select></label>
+            <p id="elevation-help" class="muted" hidden>May require more approval prompts than gsudo.</p>
+            <details id="gsudo-path"><summary>Custom gsudo path (optional)</summary><label><input name="gsudoPath" aria-label="Custom gsudo path" placeholder="Find gsudo.exe on PATH"></label><button type="button" data-action="browseGsudo">Browse…</button></details>
+            <label>Default C++ language service<select name="integration"><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
+            <div class="toolbar"><button type="submit" class="primary">Save preferences</button></div><p id="computer-status" role="status"></p>
+          </form>
+          <form id="config" hidden>
+            <label>Source directory<input name="sourceDirectory" required></label><label>Output directory<input name="outputDirectory" required></label>
+            <label>Entry globs <small>One per line, relative to source</small><textarea name="entries" rows="2"></textarea></label>
+            <label>Excluded globs<textarea name="exclude" rows="2"></textarea></label>
+            <label>Include directories <small>One per line, relative to project</small><textarea name="includeDirectories" rows="2"></textarea></label>
+            <label>External includes <small>Exact header name or macro expression per line</small><textarea name="externalIncludes" rows="2"></textarea></label>
+            <label>Generation<select name="generate"><option value="onSave">After save</option><option value="manual">Manual</option></select></label>
+            <label>Debounce (ms)<input name="debounceMs" type="number" min="0" max="10000" step="1"></label>
+            <label class="checkbox"><input name="inlineAngleIncludes" type="checkbox"> Expand local angle includes</label>
+            <button type="submit" class="primary">Save configuration</button><p id="settings-status" role="status"></p>
+          </form>
+          <form id="editor-config">
+            <label>C++ language service<select name="integration"><option value="default">Use default</option><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
+            <label>Indentation<select name="indentStyle"><option value="spaces">Spaces</option><option value="tabs">Tabs</option></select></label>
+            <label>Tab width<input name="indentSize" type="number" min="1" max="16" value="4" required></label>
+            <div class="toolbar"><button type="submit" class="primary" id="apply-editor" title="Apply editor settings. Writes editor configuration and .clang-format.">Apply</button><button type="submit" data-editor-review title="Review proposed editor changes without saving them.">Review…</button></div><p id="editor-status" role="status"></p>
+          </form>
+          <section id="git-settings" hidden>
+            <p id="settings-git-status"></p><div class="toolbar"><button data-action="sourceControl">Source control</button><button data-action="refreshGit">Refresh Git</button></div>
+            <h2>Ignored by default</h2><ul class="git-files"><li>Generated output</li><li><code>.vscode/settings.json</code></li><li><code>.vscode/c_cpp_properties.json</code></li><li><code>.clangd</code></li></ul>
+            <h2>Shared with your project</h2><ul class="git-files"><li>Source files</li><li><code>windhawk-amalgamation.json</code></li><li><code>.clang-format</code></li><li><code>.vscode/extensions.json</code></li><li><code>.gitignore</code></li></ul>
+            <button data-action="gitSetup">Initialize Git / update ignore rules</button><p class="muted">Existing ignore rules are preserved. Files already tracked by Git stay tracked.</p>
+          </section>
+        </section>
+        </main><script nonce="{{nonce}}">/* initial sidebar state */</script><script nonce="{{nonce}}" src="{{script}}"></script></body></html>
