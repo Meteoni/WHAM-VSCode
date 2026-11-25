@@ -153,10 +153,12 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       globalStored[key] = value;
     }
   };
+  // The adapter's own modules: extension.js and the generation pipeline it delegates to.
+  const fromAdapter = parent => /dist[\\/](extension|generation)\.js$/.test(parent?.filename ?? '');
   const load = Module._load;
   Module._load = function (name, ...args) {
     if (name === 'vscode') return mock;
-    if (name === './windhawk' && args[0]?.filename.endsWith('dist' + path.sep + 'extension.js')) {
+    if (name === './windhawk' && fromAdapter(args[0])) {
       const windhawk = load.call(this, name, ...args);
       return {
         ...windhawk,
@@ -166,18 +168,18 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
         }
       };
     }
-    if (name === './compiler' && args[0]?.filename.endsWith('dist' + path.sep + 'extension.js'))
+    if (name === './compiler' && fromAdapter(args[0]))
       return {
         checkModBuild: async (root, source, signal, onOutput, version, syntaxOnly) => {
           assert.equal(syntaxOnly, true);
           singleVerifies++;
         }
       };
-    if (name === './setup' && args[0]?.filename.endsWith('dist' + path.sep + 'extension.js')) {
+    if (name === './setup' && fromAdapter(args[0])) {
       const setup = load.call(this, name, ...args);
       return { ...setup, findWindhawk: async () => (noInstallations ? [] : setup.findWindhawk()) };
     }
-    if (name === './io' && args[0]?.filename.endsWith('dist' + path.sep + 'extension.js')) {
+    if (name === './io' && fromAdapter(args[0])) {
       const io = load.call(this, name, ...args);
       return {
         ...io,
@@ -194,7 +196,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
         }
       };
     }
-    if (name === './config' && args[0]?.filename.endsWith('dist' + path.sep + 'extension.js')) {
+    if (name === './config' && fromAdapter(args[0])) {
       const config = load.call(this, name, ...args);
       return {
         ...config,
@@ -204,7 +206,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
         }
       };
     }
-    if (name === './engine' && args[0]?.filename.endsWith('dist' + path.sep + 'extension.js')) {
+    if (name === './engine' && fromAdapter(args[0])) {
       const engine = load.call(this, name, ...args);
       return {
         ...engine,
@@ -224,6 +226,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
   let extension;
   try {
     delete require.cache[require.resolve('../dist/extension')];
+    delete require.cache[require.resolve('../dist/generation')];
     extension = require('../dist/extension');
   } finally {
     Module._load = load;

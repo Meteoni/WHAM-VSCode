@@ -2,13 +2,12 @@ import * as vscode from 'vscode';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { contained, defaults, discoverEntries, outputPath, portableRelative, validateConfig } from './config';
+import { contained, defaults, discoverEntries, outputPath, validateConfig } from './config';
 import { checksum, generateEntry, restoreSource } from './engine';
 import {
   assertSafeDestination,
   changedSince,
   commitRestore,
-  inputsUnchanged,
   loadProject,
   nodeFiles,
   readIfExists,
@@ -28,6 +27,7 @@ import {
   previewLanguage
 } from './windhawk';
 import { ComputerPreferencesInput, createSidebarRouter, ProjectMessage } from './sidebar';
+import { createGenerationPipeline } from './generation';
 import {
   compileStatus,
   CompiledSnapshot,
@@ -35,7 +35,6 @@ import {
   EntryState,
   installedModKey,
   localModId,
-  ownedOutput,
   pathKey,
   projectSummary,
   ProjectState,
@@ -250,22 +249,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     for (const [file, list] of grouped) diagnostics.set(vscode.Uri.file(file), list);
   };
-  const relevantDirty = (state: ProjectState, entry?: EntryState) =>
-    vscode.workspace.textDocuments.filter(
-      document =>
-        document.isDirty &&
-        document.uri.scheme === 'file' &&
-        (sameFile(document.uri.fsPath, path.join(state.project.root, 'windhawk-amalgamation.json')) ||
-          (entry
-            ? sameFile(document.uri.fsPath, entry.path) ||
-              dependsOn(entry, document.uri.fsPath) ||
-              (!entry.draft &&
-                !entry.result &&
-                contained(path.join(state.project.root, state.project.config.sourceDirectory), document.uri.fsPath))
-            : contained(path.join(state.project.root, state.project.config.sourceDirectory), document.uri.fsPath)))
-    );
+  // Save → debounce → generate → protected write lives in generation.ts; this binds it to VS Code.
+  // The hooks are called lazily, so the Draft and runtime refreshes can be defined below.
+  const pipeline = createGenerationPipeline(
+    {
+      isDisposed: () => disposed,
+      isDirty,
+      dirtyText: file =>
+        vscode.workspace.textDocuments
+          .find(document => sameFile(document.uri.fsPath, file) && document.isDirty)
+          ?.getText(),
+      dirtyFiles: () =>
+        vscode.workspace.textDocuments
+          .filter(document => document.isDirty && document.uri.scheme === 'file')
+          .map(document => document.uri.fsPath),
+      log: line => log.appendLine(line),
+      publish: () => publish(),
+      presentDiagnostics: () => presentDiagnostics(),
+      saveHashes: hashes => context.workspaceState.update('outputHashes', hashes),
+      gitStatus: root => gitStatus(root, gitExecutable()),
+      refreshDraft: (state, entries) => refreshDraft(state, entries),
+      refreshRuntime: state => refreshRuntime(state),
+      refreshEditorConfiguration: state => refreshEditorConfiguration(state),
+      editorFilesChanged: async state => {
+        state.editor = await resolveEditor(state.project.root);
+        await refreshEditorConfiguration(state);
+        publish();
+      }
+    },
+    storedHashes
+  );
+  const { relevantDirty, reconcileOutput, scheduleRefresh, refresh, enqueue } = pipeline;
+  const changed = (file: string, discovery = false) => pipeline.changed(projects.values(), file, discovery);
   const saveRelevant = async (state: ProjectState): Promise<boolean> => {
-    const dirty = relevantDirty(state);
+    const files = relevantDirty(state);
+    const dirty = vscode.workspace.textDocuments.filter(
+      document => document.isDirty && document.uri.scheme === 'file' && files.includes(document.uri.fsPath)
+    );
     if (!dirty.length) return true;
     const choice = await vscode.window.showWarningMessage(
       `${dirty.length} relevant document(s) have unsaved changes. Generation reads saved files.`,
@@ -389,29 +409,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           error: modId ? (entry.buildError ?? entry.runtime?.error) : 'Add a valid @id before compiling.'
         };
         updateCompileStatus(state, entry);
-        const output = outputPath(state.project, entry.path);
-        const dirtyOutput = isDirty(output);
-        if (dirtyOutput) {
-          entry.status = 'blocked';
-          entry.message = 'Output has unsaved edits.';
-        } else if (relevantDirty(state, entry).length) {
-          entry.status = 'pending';
-          entry.message = 'Waiting for source buffers to be saved.';
-        } else {
-          const existing = await readIfExists(output);
-          if (existing && entry.draft?.bytes?.equals(existing)) {
-            entry.status = 'current';
-            entry.ownedHash = checksum(existing);
-            storedHashes[output] = entry.ownedHash;
-            entry.message = entry.draft!.dependencies.size + ' source file(s)';
-          } else if (existing && !ownedOutput(existing, entry, state.project.root)) {
-            entry.status = 'blocked';
-            entry.message = 'Output was edited. Compare, restore edits, or explicitly discard them.';
-          } else {
-            entry.status = 'stale';
-            entry.message = entry.draft?.diagnostics.find(item => item.severity === 'error')?.message;
-          }
-        }
+        await reconcileOutput(state, entry);
         if (sidebarDetails?.entry === entry.path)
           await sidebarDetails.controller.update({
             installation: state.windhawk ?? { root, parser: false, cli: false },
@@ -489,270 +487,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     await refreshEditorConfiguration(state);
     publish();
-  };
-  const scheduleRefresh = (state: ProjectState, pollInstalled = false, entries = [...state.entries.values()]) => {
-    if (disposed || state.removed) return;
-    for (const entry of entries) state.draftPending.add(entry.path);
-    state.pollInstalled ||= pollInstalled;
-    if (state.runtimeTimer) clearTimeout(state.runtimeTimer);
-    state.runtimeTimer = setTimeout(() => {
-      if (state.runtimePending || disposed || state.removed) return;
-      state.runtimePending = true;
-      state.queue = state.queue
-        .then(async () => {
-          if (disposed || state.removed) return;
-          state.runtimePending = false;
-          const poll = state.pollInstalled;
-          state.pollInstalled = false;
-          const entries = [...state.draftPending]
-            .map(file => state.entries.get(file))
-            .filter((entry): entry is EntryState => !!entry);
-          state.draftPending.clear();
-          if (entries.length) await refreshDraft(state, entries);
-          if (poll) await refreshRuntime(state);
-        })
-        .catch(error => {
-          state.runtimePending = false;
-          log.appendLine(String(error));
-        });
-    }, 350);
-  };
-  const refresh = async (state: ProjectState) => {
-    if (disposed || state.removed) return;
-    state.project = await loadProject(state.project.root);
-    const entries = await discoverEntries(state.project, nodeFiles);
-    if (state.removed) return;
-    for (const previous of [...state.entries.values()]) {
-      const stillExists = entries.includes(previous.path);
-      const nextOutput = stillExists ? outputPath(state.project, previous.path) : undefined;
-      if (stillExists && nextOutput === previous.output) continue;
-      const output = previous.output;
-      try {
-        const existing = await fs.readFile(output);
-        if (previous.ownedHash === checksum(existing) && !isDirty(output)) {
-          await assertSafeDestination(state.project.root, portableRelative(state.project.root, output));
-          if (state.removed) return;
-          await fs.rm(output);
-          delete storedHashes[output];
-        } else state.retained.push(`Preserved orphan output: ${output}`);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') log.appendLine(String(error));
-      }
-      state.entries.delete(previous.path);
-    }
-    for (const entry of entries)
-      if (!state.entries.has(entry))
-        state.entries.set(entry, {
-          path: entry,
-          output: outputPath(state.project, entry),
-          status: 'stale',
-          ownedHash: storedHashes[outputPath(state.project, entry)]
-        });
-    for (const entry of state.entries.values()) {
-      const document = vscode.workspace.textDocuments.find(
-        document => sameFile(document.uri.fsPath, entry.path) && document.isDirty
-      );
-      entry.metadata = parseMetadata(document ? document.getText() : await fs.readFile(entry.path, 'utf8'), entry.path);
-    }
-    state.error = undefined;
-    state.git = await gitStatus(state.project.root, gitExecutable());
-    presentDiagnostics();
-  };
-  const generate = async (state: ProjectState, entry: EntryState, force: boolean) => {
-    if (disposed || state.removed) return;
-    const output = outputPath(state.project, entry.path);
-    const dirtyOutput = isDirty(output);
-    if (dirtyOutput) {
-      entry.status = 'blocked';
-      entry.message = 'Output has unsaved edits. Save or revert it before regenerating.';
-      publish();
-      return;
-    }
-    if (relevantDirty(state, entry).length) {
-      entry.status = 'pending';
-      entry.message = 'Waiting for source buffers to be saved.';
-      publish();
-      return;
-    }
-    entry.status = 'generating';
-    entry.message = undefined;
-    publish();
-    const result =
-      entry.draft?.bytes &&
-      !entry.draftInvalidated &&
-      entry.draftConfig === JSON.stringify(state.project.config) &&
-      (await inputsUnchanged(entry.draft.dependencies))
-        ? entry.draft
-        : await generateEntry(state.project, entry.path, nodeFiles);
-    entry.result = result;
-    entry.draft = result;
-    entry.draftConfig = JSON.stringify(state.project.config);
-    entry.draftInvalidated = false;
-    for (const diagnostic of result.diagnostics)
-      log.appendLine(`${diagnostic.path}:${diagnostic.line + 1}: ${diagnostic.message}`);
-    if (!result.bytes) {
-      entry.status = 'stale';
-      entry.message = result.diagnostics.find(item => item.severity === 'error')?.message;
-      return;
-    }
-    const existing = await readIfExists(output);
-    if (existing && !force && !ownedOutput(existing, entry, state.project.root, result.bytes)) {
-      entry.status = 'blocked';
-      entry.message = 'Output was edited. Compare, restore edits, or explicitly discard them.';
-      return;
-    }
-    if (!(await inputsUnchanged(result.dependencies)) || relevantDirty(state, entry).length) {
-      entry.status = 'pending';
-      entry.message = 'Source changed during generation; queued another pass.';
-      schedule(state, [entry.path]);
-      return;
-    }
-    // Recheck output immediately before commit, including documents dirtied during generation.
-    if (changedSince(await readIfExists(output), existing) || isDirty(output)) {
-      entry.status = 'blocked';
-      entry.message = 'Output changed during generation; no write performed.';
-      return;
-    }
-    if (disposed || state.removed) return;
-    if (!existing?.equals(result.bytes)) await writeOutput(state.project, output, result.bytes);
-    entry.ownedHash = checksum(result.bytes);
-    storedHashes[output] = entry.ownedHash;
-    entry.status = 'current';
-    entry.message = `${result.dependencies.size} source file(s)`;
-  };
-  const enqueue = (
-    state: ProjectState,
-    targets?: string[],
-    options: { force?: boolean; refreshProject?: boolean } = {}
-  ): Promise<void> => {
-    state.queue = state.queue.then(async () => {
-      if (disposed || state.removed) return;
-      try {
-        // Save events already use the known dependency graph; structural/config
-        // events refresh it separately. Explicit commands still discover entries.
-        if (options.refreshProject !== false) await refresh(state);
-        const entries = [...state.entries.values()].filter(entry => !targets || targets.includes(entry.path));
-        for (const entry of entries) state.draftPending.delete(entry.path);
-        for (const entry of entries) {
-          try {
-            await generate(state, entry, options.force ?? false);
-          } catch (error) {
-            entry.status = 'stale';
-            entry.message = String(error);
-            log.appendLine(String(error));
-          }
-        }
-        await context.workspaceState.update('outputHashes', storedHashes);
-        await refreshDraft(state, entries);
-        if (options.refreshProject === false) state.git = await gitStatus(state.project.root, gitExecutable());
-      } catch (error) {
-        state.error = (error as Error).message;
-        log.appendLine(String(error));
-      }
-      presentDiagnostics();
-      publish();
-    });
-    return state.queue;
-  };
-  const schedule = (state: ProjectState, targets: string[]) => {
-    if (disposed || state.removed) return;
-    for (const target of targets) {
-      state.pending.add(target);
-      // Generation reconciles Draft too; retire the earlier typing/save refresh.
-      state.draftPending.delete(target);
-    }
-    if (state.timer) clearTimeout(state.timer);
-    state.timer = setTimeout(() => {
-      const targets = [...state.pending];
-      state.pending.clear();
-      void enqueue(state, targets, { refreshProject: false });
-    }, state.project.config.debounceMs);
-  };
-  const changed = (file: string, discovery = false) => {
-    for (const state of projects.values()) {
-      if (!contained(state.project.root, file)) continue;
-      const source = path.join(state.project.root, state.project.config.sourceDirectory),
-        output = path.join(state.project.root, state.project.config.outputDirectory);
-      if (
-        [
-          '.vscode/settings.json',
-          '.vscode/c_cpp_properties.json',
-          '.vscode/extensions.json',
-          '.clang-format',
-          '.clangd'
-        ].some(local => sameFile(file, path.join(state.project.root, local)))
-      ) {
-        state.queue = state.queue.then(async () => {
-          if (disposed || state.removed) return;
-          try {
-            state.editor = await resolveEditor(state.project.root);
-            await refreshEditorConfiguration(state);
-            publish();
-          } catch (error) {
-            log.appendLine(String(error));
-          }
-        });
-        continue;
-      }
-      if (contained(output, file)) {
-        for (const entry of state.entries.values())
-          if (sameFile(outputPath(state.project, entry.path), file)) {
-            void fs
-              .readFile(file)
-              .then(bytes => {
-                if (entry.ownedHash !== checksum(bytes)) {
-                  entry.status = 'blocked';
-                  entry.message = 'Generated output changed on disk.';
-                  publish();
-                }
-              })
-              .catch(() => {
-                entry.status = 'stale';
-                publish();
-              });
-          }
-        continue;
-      }
-      const configurationChanged = sameFile(file, path.join(state.project.root, 'windhawk-amalgamation.json'));
-      const targets = [...state.entries.values()].filter(entry => configurationChanged || dependsOn(entry, file));
-      for (const entry of targets) {
-        entry.draftInvalidated ||= discovery;
-        if (entry.status !== 'blocked') {
-          entry.status = 'stale';
-          entry.message = 'Saved sources or project configuration changed.';
-        }
-      }
-      // New/deleted .cpp files change the entry list, not every existing mod's inputs.
-      if (configurationChanged || (discovery && /\.cpp$/i.test(file) && contained(source, file))) {
-        state.queue = state.queue.then(async () => {
-          if (disposed || state.removed) return;
-          try {
-            await refresh(state);
-            if (configurationChanged) await refreshEditorConfiguration(state);
-            const affected = [...state.entries.values()].filter(
-              entry => configurationChanged || !entry.draft || targets.includes(entry)
-            );
-            if (state.project.config.generate === 'onSave')
-              schedule(
-                state,
-                affected.map(entry => entry.path)
-              );
-            else scheduleRefresh(state, false, affected);
-          } catch (error) {
-            state.error = String(error);
-          }
-          publish();
-        });
-      } else if (targets.length) {
-        if (state.project.config.generate === 'onSave')
-          schedule(
-            state,
-            targets.map(entry => entry.path)
-          );
-        else scheduleRefresh(state, false, targets);
-        publish();
-      }
-    }
   };
   const rememberProject = async (root: string) => {
     recentProjects = [root, ...recentProjects.filter(previous => !sameFile(previous, root))].slice(0, 15);
