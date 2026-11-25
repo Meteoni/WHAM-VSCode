@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # The extension targets Windows; tests cover Windows paths, file locking and Git.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # Close to the Node.js in VS Code's extension host; package.json requires >= 20.
+          node-version: 22
+          cache: npm
+
+      # No runtime or check dependency needs install scripts; only vsce's
+      # packaging helpers (keytar, vsce-sign) have them.
+      - run: npm ci --ignore-scripts
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build and test
+        run: npm test
