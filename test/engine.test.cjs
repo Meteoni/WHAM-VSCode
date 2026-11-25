@@ -4,8 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { defaults, validateConfig, discoverEntries, outputPath } = require('../dist/config');
 const { generateEntry, restoreSource, checksum } = require('../dist/engine');
-const { scanSource } = require('../dist/scanner');
-const { commitRestore, nodeFiles } = require('../dist/io');
+const { commitRestore } = require('../dist/io');
 
 function fixture(contents, configuration = {}) {
   const root = path.resolve('work', 'fixture');
@@ -104,7 +103,7 @@ test('nested source preserves Windhawk metadata and explicit included cpp', asyn
 });
 test('lexical context, continuations, comments before directives, and raw markers', async () => {
   const source =
-    'const char* s = R"tag(\n#include "fake.h"\n// WHAM@1 {"type":"fake"}\n)tag";\nconst char* q = "#include \\\"fake.h\\\"";\n/* prefix */ # include \\\n "real.h" // trailing\n/* spanning\n*/#include "real.h"\n';
+    'const char* s = R"tag(\n#include "fake.h"\n// WHAM@1 {"type":"fake"}\n)tag";\nconst char* q = "#include \\"fake.h\\"";\n/* prefix */ # include \\\n "real.h" // trailing\n/* spanning\n*/#include "real.h"\n';
   const { generated } = await roundTrip({ 'src/mod.cpp': source, 'src/real.h': '/* #include "fake.h" */\n' });
   assert.equal(generated.diagnostics.length, 0);
 });

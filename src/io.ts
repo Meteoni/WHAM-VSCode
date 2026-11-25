@@ -147,7 +147,7 @@ export async function writeOutput(project: Project, output: string, bytes: Buffe
         await delay(20 * (attempt + 1));
         await assertSafeDestination(project.root, portableRelative(project.root, output));
         if (changedSince(await readIfExists(output), previous))
-          throw new Error(`Destination changed while waiting for a file lock: ${output}`);
+          throw new Error(`Destination changed while waiting for a file lock: ${output}`, { cause: error });
       }
     }
   } finally {

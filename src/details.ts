@@ -63,7 +63,8 @@ export function createDetailsView(
       </div><p id="wham-loading" role="status">Loading mod details…</p><div id="root"></div>
       <script nonce="${nonce}">window.whamPreviewContext = ${JSON.stringify({ ...previewContext(), epoch: heldEpoch, session: nonce })};</script><script nonce="${nonce}" src="${script}"></script></body></html>`;
   };
-  const reply = (message: any, result: Record<string, unknown>) =>
+  /** A renderer request forwarded by details.js; replies are matched by epoch and messageId. */
+  const reply = (message: { epoch: number; command: string; messageId: number }, result: Record<string, unknown>) =>
     !disposed &&
     webview.postMessage({
       type: 'windhawkReply',

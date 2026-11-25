@@ -177,18 +177,16 @@ const windhawk = require('../dist/windhawk');
       'Toolbar works before renderer assets load'
     );
     const toolbarSize = () =>
-      page
-        .locator('#wham-header')
-        .evaluate(header => ({
-          height: header.offsetHeight,
-          width: header.getBoundingClientRect().width,
-          x: header.getBoundingClientRect().x,
-          controls: [...header.querySelectorAll('button,summary')].map(control => ({
-            width: control.offsetWidth,
-            height: control.offsetHeight,
-            font: getComputedStyle(control).fontSize
-          }))
-        }));
+      page.locator('#wham-header').evaluate(header => ({
+        height: header.offsetHeight,
+        width: header.getBoundingClientRect().width,
+        x: header.getBoundingClientRect().x,
+        controls: [...header.querySelectorAll('button,summary')].map(control => ({
+          width: control.offsetWidth,
+          height: control.offsetHeight,
+          font: getComputedStyle(control).fontSize
+        }))
+      }));
     const before = await toolbarSize();
     const tabs = await page.locator('.wham-navigation').boundingBox();
     assert.equal(tabs.x, 12);
@@ -239,14 +237,12 @@ const windhawk = require('../dist/windhawk');
         await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
         'Narrow pane has no horizontal overflow'
       );
-      const controls = await page
-        .locator('.wham-toolbar button:visible, .more-menu > summary')
-        .evaluateAll(elements =>
-          elements.map(element => ({
-            y: element.getBoundingClientRect().y,
-            height: element.getBoundingClientRect().height
-          }))
-        );
+      const controls = await page.locator('.wham-toolbar button:visible, .more-menu > summary').evaluateAll(elements =>
+        elements.map(element => ({
+          y: element.getBoundingClientRect().y,
+          height: element.getBoundingClientRect().height
+        }))
+      );
       assert.ok(
         controls.every(control => control.y === controls[0].y && control.height === controls[0].height),
         'Toolbar controls share one row and height'

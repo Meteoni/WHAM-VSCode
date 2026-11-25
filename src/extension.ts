@@ -37,7 +37,6 @@ import {
   appendIgnoreRules,
   createInitialCommit,
   editorConfiguration,
-  editorDefaults,
   EditorSettings,
   findWindhawk,
   gitStatus,
@@ -2203,7 +2202,7 @@ ${sidebarStyles}</style></head><body>
                 case 'testCompile':
                   await compileMod(state, entry, true);
                   break;
-                case 'stopCompile':
+                case 'stopCompile': {
                   const owner = entry.abort
                     ? entry
                     : entry.runtime?.id
@@ -2216,6 +2215,7 @@ ${sidebarStyles}</style></head><body>
                     publish();
                   }
                   break;
+                }
                 case 'enable':
                   if (typeof message.enabled === 'boolean') await enableMod(state, entry, message.enabled);
                   break;

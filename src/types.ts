@@ -1,3 +1,10 @@
+/**
+ * JSON parsed from Windhawk processes or user configuration files. Callers check
+ * the fields they read before trusting them.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type UntrustedJson = any;
+
 export interface Configuration {
   formatVersion: 1;
   sourceDirectory: string;

@@ -31,6 +31,7 @@
     "test": "npm run build && node --test test/*.test.cjs",
     "format": "prettier --write \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
+    "lint": "eslint src media/*.js test scripts",
     "package": "vsce package --githubBranch main --baseImagesUrl https://raw.githubusercontent.com/Meteoni/WHAM-VSCode/main",
     "vscode:prepublish": "npm run build && npm run build:bridge"
   },
@@ -40,11 +41,15 @@
     "yaml": "^2.8.1"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "^3.2.1",
+    "eslint": "10.15.0",
+    "globals": "17.14.0",
     "prettier": "3.10.1",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "typescript-eslint": "8.74.0"
   },
   "contributes": {
     "configuration": {

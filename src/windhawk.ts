@@ -5,6 +5,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import type { InstallationPreferences } from './preferences';
+import type { UntrustedJson } from './types';
 
 const elevationSessions = new Map<string, Promise<void>>();
 
@@ -333,7 +334,7 @@ export async function invokeWindhawkCore(
   root: string,
   command: string,
   params: Record<string, unknown> = {}
-): Promise<any> {
+): Promise<UntrustedJson> {
   if (!['parseModSource', 'getCompileFlags'].includes(command))
     throw new Error('Unsupported Windhawk parsing command.');
   if (process.platform !== 'win32' || !['x64', 'arm64'].includes(process.arch))
@@ -392,7 +393,7 @@ export async function runWindhawkCli(
   onOutput?: (text: string) => void,
   signal?: AbortSignal,
   elevation?: InstallationPreferences
-): Promise<any> {
+): Promise<UntrustedJson> {
   const { code, stdout, stderr } = await runWindhawkProcess(
     path.join(root, 'windhawk-cli.exe'),
     ['--app-root', root, '--json', ...args],

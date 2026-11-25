@@ -553,7 +553,7 @@ export async function generateEntry(project: Project, entryPath: string, files: 
     if (result.diagnostics.some(item => item.severity === 'error')) return result;
     const root = portableRelative(project.root, entryPath);
     const rootRelative = path.posix.relative(project.config.sourceDirectory, root);
-    const config = { ...project.config, entries: [rootRelative.replace(/([*?\[\]{}()!+@])/g, '[$1]')], exclude: [] };
+    const config = { ...project.config, entries: [rootRelative.replace(/([*?[\]{}()!+@])/g, '[$1]')], exclude: [] };
     const tail = body && !body.endsWith('\n') ? '\n' : '';
     const manifest: Manifest = {
       type: 'manifest',

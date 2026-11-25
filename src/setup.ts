@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { isMap, parseAllDocuments } from 'yaml';
 import { assertSafeDestination, initializeProject, readIfExists, writeOutput } from './io';
-import { Project, RestoreResult } from './types';
+import { Project, RestoreResult, UntrustedJson } from './types';
 import { readWindhawkPaths } from './windhawk';
 
 const run = promisify(execFile);
@@ -152,7 +152,9 @@ export async function setupProject(
         'true';
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-        throw new Error('Git executable not found. Install Git or configure git.path, then retry setup.');
+        throw new Error('Git executable not found. Install Git or configure git.path, then retry setup.', {
+          cause: error
+        });
     }
     if (!inside) {
       await run(git, ['init', root], { windowsHide: true });
@@ -297,7 +299,7 @@ export async function editorConfiguration(
     return (await readIfExists(await assertSafeDestination(project.root, relative)))?.toString('utf8');
   };
   /** Missing or blank JSONC files start as an empty object; anything else must be an object. */
-  const readJsonObject = async (relative: string): Promise<{ text: string; value: Record<string, any> }> => {
+  const readJsonObject = async (relative: string): Promise<{ text: string; value: Record<string, UntrustedJson> }> => {
     const existing = await read(relative);
     const text = existing?.trim() ? existing : '{}\n';
     const errors: ParseError[] = [];
@@ -387,7 +389,8 @@ export async function editorConfiguration(
       'WH_EDITING'
     ];
     if (input.integration !== 'clangd') {
-      let { text: properties, value: parsed } = await readJsonObject('.vscode/c_cpp_properties.json');
+      const { text: propertiesText, value: parsed } = await readJsonObject('.vscode/c_cpp_properties.json');
+      let properties = propertiesText;
       const configurations = parsed.configurations ?? [];
       if (!Array.isArray(configurations)) throw new Error('c_cpp_properties.configurations must be an array.');
       const windhawk = {
