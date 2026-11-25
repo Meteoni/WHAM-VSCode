@@ -6,6 +6,7 @@ tsconfig.json
 .prettierrc.json
 eslint.config.mjs
 .git-blame-ignore-revs
+.github/**
 package-lock.json
 *.zip
 *.vsix

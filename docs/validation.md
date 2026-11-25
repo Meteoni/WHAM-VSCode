@@ -1,3 +1,11 @@
+## 1.7.2 — 2026-11-25
+
+- All 73 regression tests passed locally and on the new GitHub Actions workflow (Windows, Node.js 22), which also checks formatting and lint. New cases cover linear-time scanning of 40,000 lines, blank, `null` and multi-document editor files, a disposed sidebar view, edits outside every project, reloading projects outside the workspace folders, and recovered entry names containing glob characters.
+- Running the suite with Node.js 22 and TEMP on 8.3 short paths, as on CI runners, exposed path-alias mismatches in the initial commit and Draft reuse. Both now compare canonical paths, and CI exercises short paths on every run.
+- minimatch 10 and 11 agreed on all 594 pattern/path pairs checked with WHAM's options. The production dependency audit reports no advisories.
+- Native x64 checks passed parser parity, Windows argv, cancellation and child cleanup, deadlines, temporary DLL linking, syntax-only x86/x64/ARM64 with metadata flags, and unresolved-symbol rejection. The installed Windhawk Clang validated both demo entries, generated outputs, generated clangd settings and exact recovery. All 78 preprocessing, final macro-state and syntax comparisons passed, as did grammar validation.
+- Browser sidebar workflows were not run (Playwright unavailable). The sidebar markup moved to `media/sidebar.html` and was verified byte-identical to the previous inline template instead. The VS Code host test, elevation, ARM64 execution and a real install/load cycle were not exercised.
+
 ## 1.7.1 — 2026-11-08
 
 - All 69 regression tests passed. Compile target confirmation, startup readiness, direct editor setup, customized settings, Skip, save dependency targeting, output protection, and project lifecycle checks remain covered.

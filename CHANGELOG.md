@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 1.7.2
 
 - Scan C++ sources in linear time. Large, heavily commented files no longer stall typing, metadata parsing, or generation.
 - Republish the sidebar and diagnostics only when an edited document belongs to a project.
