@@ -30,6 +30,7 @@ import {
   WindhawkInstallation,
   previewLanguage
 } from './windhawk';
+import { ComputerPreferencesInput, createSidebarRouter, ProjectMessage } from './sidebar';
 import { createDetailsView, DetailsData } from './details';
 import { checkModBuild } from './compiler';
 import { InstallationPreferences, loadLocalPreferences } from './preferences';
@@ -1929,6 +1930,187 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         generate: state.project.config.generate === 'onSave' ? 'manual' : 'onSave'
       });
   });
+  // Sidebar protocol: parsing and dispatch live in sidebar.ts; these are the operations.
+  const postToSidebar = (message: unknown) => view?.webview.postMessage(message);
+  const unquote = (value: string) => value.trim().replace(/^(['"])(.*)\1$/, '$2');
+  const readComputerPreferences = (settings: ComputerPreferencesInput) => {
+    const root = unquote(settings.installationPath);
+    if (root && !path.isAbsolute(root)) throw new Error('Choose an absolute Windhawk installation path.');
+    const preferences: InstallationPreferences = {
+      elevation: settings.elevation,
+      gsudoPath: unquote(settings.gsudoPath)
+    };
+    return { root, preferences };
+  };
+  const anyBusy = (states: Iterable<ProjectState>) =>
+    [...states].some(project => [...project.entries.values()].some(entry => entry.busy));
+  const saveComputerPreferences = async (settings: ComputerPreferencesInput) => {
+    const { root, preferences } = readComputerPreferences(settings);
+    await inspectElevation(preferences);
+    if (anyBusy(projects.values()))
+      throw new Error('Wait for the current Windhawk operation before changing preferences.');
+    if (root) await fs.access(path.join(root, 'windhawk.ini'));
+    const previous = installationPreferences(localPreferences.computer.installationPath);
+    if (
+      !sameFile(root, localPreferences.computer.installationPath) ||
+      previous.elevation !== preferences.elevation ||
+      previous.gsudoPath !== preferences.gsudoPath
+    )
+      await closeElevationSessions();
+    if (root) localPreferences.computer.installations[pathKey(root)] = preferences;
+    localPreferences.computer.installationPath = root;
+    localPreferences.computer.integration = settings.integration;
+    await context.globalState.update('localPreferences', localPreferences);
+    for (const project of projects.values()) {
+      project.editor = await resolveEditor(project.project.root);
+      await refreshRuntime(project);
+      await refreshDraft(project);
+    }
+    publish();
+    await postToSidebar({ type: 'computerSaved' });
+  };
+  const browseComputerInstallation = async () => {
+    const found = await findWindhawk();
+    const selected = found.length
+      ? await vscode.window.showQuickPick([...found, 'Browse…'], { title: 'Windhawk installation' })
+      : 'Browse…';
+    if (!selected) return;
+    const installation =
+      selected === 'Browse…'
+        ? (
+            await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false })
+          )?.[0].fsPath
+        : selected;
+    if (installation) await postToSidebar({ type: 'computerInstallation', value: installation });
+  };
+  const applyEditorFromSidebar = async (
+    state: ProjectState,
+    message: Extract<ProjectMessage, { action: 'editor' | 'reviewEditor' }>
+  ) => {
+    const integration = message.integration ?? projectPreferences(state.project.root).integration ?? 'default';
+    const settings = {
+      ...state.editor,
+      integration: integration === 'default' ? localPreferences.computer.integration : integration,
+      indentStyle: message.indentStyle as EditorSettings['indentStyle'],
+      indentSize: message.indentSize as number
+    };
+    if (await applyEditor(state, settings, message.action === 'reviewEditor')) {
+      await setProjectPreference(state.project.root, integration === 'default' ? {} : { integration });
+      state.editor = await resolveEditor(state.project.root);
+      await refreshEditorConfiguration(state);
+      publish();
+      await postToSidebar({ type: 'editorSaved', root: state.project.root });
+    } else if (message.action === 'reviewEditor')
+      await postToSidebar({ type: 'editorReviewed', root: state.project.root });
+  };
+  const stopOperation = (state: ProjectState, entry: EntryState) => {
+    // A peer card can stop the build that another project's card started for the same mod.
+    const owner = entry.abort
+      ? entry
+      : entry.runtime?.id
+        ? installedOperations.get(installedModKey(state.editor.installationPath, entry.runtime.id))
+        : undefined;
+    if (owner?.abort && !owner.abort.signal.aborted) {
+      owner.stopping = true;
+      if (owner.runtime) owner.runtime.stopping = true;
+      owner.abort.abort();
+      publish();
+    }
+  };
+  const refreshGit = async (state: ProjectState) => {
+    state.git = await gitStatus(state.project.root, gitExecutable());
+    publish();
+  };
+  const routeSidebarMessage = createSidebarRouter<ProjectState, EntryState>({
+    findProject: root => (typeof root === 'string' ? projects.get(root) : undefined),
+    findEntry: (state, entry) => (typeof entry === 'string' ? state.entries.get(entry) : undefined),
+    selectProject: state => {
+      selectedRoot = state.project.root;
+    },
+    global: {
+      ready: async () => {
+        await refreshRecentProjects();
+        publish();
+        pendingSidebarPage = undefined;
+      },
+      logs: async () => log.show(),
+      openProject: message => openExistingProject(message.projectRoot, message.browse),
+      initialize: async message => {
+        const completed = await initialize(
+          message.mode,
+          message.openProject ?? openAfterSetup(),
+          message.initialCommit ?? initialCommitEnabled()
+        );
+        await postToSidebar({ type: 'setupFinished', completed });
+      },
+      browseGsudo: async () => {
+        const selected = await vscode.window.showOpenDialog({
+          canSelectFiles: true,
+          canSelectFolders: false,
+          canSelectMany: false,
+          filters: { Executable: ['exe'] },
+          openLabel: 'Choose gsudo.exe'
+        });
+        if (selected?.[0]) await postToSidebar({ type: 'gsudoPath', value: selected[0].fsPath });
+      },
+      browseComputerInstallation,
+      checkElevation: async message => {
+        const availability = await inspectElevation(readComputerPreferences(message.settings).preferences);
+        await postToSidebar({ type: 'elevationChecked', message: availability.notice });
+      },
+      computerPreferences: message => saveComputerPreferences(message.settings),
+      restore: () => restore()
+    },
+    project: {
+      openFolder: state =>
+        vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(state.project.root), false),
+      refreshGit,
+      sourceControl: () => vscode.commands.executeCommand('workbench.view.scm'),
+      gitSetup: async state => {
+        await setupProject(state.project.root, { git: gitExecutable() });
+        await refreshGit(state);
+      },
+      projectPreferences: async (state, message) => {
+        if (anyBusy([state])) throw new Error('Wait for the current Windhawk operation before changing preferences.');
+        await setProjectPreference(
+          state.project.root,
+          message.integration !== 'default' ? { integration: message.integration } : {}
+        );
+        state.editor = await resolveEditor(state.project.root);
+        await refreshRuntime(state);
+        await refreshDraft(state);
+        publish();
+        await postToSidebar({ type: 'projectPreferencesSaved' });
+      },
+      editor: applyEditorFromSidebar,
+      reviewEditor: applyEditorFromSidebar,
+      select: async state => {
+        await rememberProject(state.project.root);
+        publish();
+      },
+      config: async (state, message) => {
+        await updateConfig(state, message.config);
+        await postToSidebar({ type: 'saved', root: state.project.root });
+      },
+      generateAll: async state => {
+        if (await saveRelevant(state)) await enqueue(state);
+      }
+    },
+    entry: {
+      details: (state, entry) => showDetails(state, entry),
+      compile: (state, entry) => compileMod(state, entry),
+      testCompile: (state, entry) => compileMod(state, entry, true),
+      stopCompile: async (state, entry) => stopOperation(state, entry),
+      enable: (state, entry, message) => enableMod(state, entry, message.enabled),
+      open: (state, entry, message) => runModAction(state, entry, 'open', message.line),
+      generate: (state, entry) => runModAction(state, entry, 'generate'),
+      compare: (state, entry) => runModAction(state, entry, 'compare'),
+      restore: (state, entry) => runModAction(state, entry, 'restore'),
+      discard: (state, entry) => runModAction(state, entry, 'discard'),
+      output: (state, entry) => runModAction(state, entry, 'output'),
+      verify: (state, entry) => runModAction(state, entry, 'verify')
+    }
+  });
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'windhawk.projects',
@@ -1965,223 +2147,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             view = undefined;
           });
           sidebarReceiver = view.webview.onDidReceiveMessage(async message => {
+            // While mod details occupy the sidebar, its own controller handles messages.
+            if (sidebarDetails) return;
             try {
-              if (!message || typeof message.action !== 'string') return;
-              if (sidebarDetails || message.details === true) return;
-              if (message.action === 'ready') {
-                await refreshRecentProjects();
-                publish();
-                pendingSidebarPage = undefined;
-                return;
-              }
-              if (message.action === 'openProject') {
-                await openExistingProject(
-                  typeof message.projectRoot === 'string' ? message.projectRoot : undefined,
-                  message.browse === true
-                );
-                return;
-              }
-              if (message.action === 'initialize') {
-                const completed = await initialize(
-                  message.mode,
-                  typeof message.openProject === 'boolean' ? message.openProject : openAfterSetup(),
-                  typeof message.initialCommit === 'boolean' ? message.initialCommit : initialCommitEnabled()
-                );
-                await view?.webview.postMessage({ type: 'setupFinished', completed });
-                return;
-              }
-              if (message.action === 'logs') {
-                log.show();
-                return;
-              }
-              if (message.action === 'browseComputerInstallation' || message.action === 'browseGsudo') {
-                if (message.action === 'browseGsudo') {
-                  const selected = await vscode.window.showOpenDialog({
-                    canSelectFiles: true,
-                    canSelectFolders: false,
-                    canSelectMany: false,
-                    filters: { Executable: ['exe'] },
-                    openLabel: 'Choose gsudo.exe'
-                  });
-                  if (selected?.[0]) await view?.webview.postMessage({ type: 'gsudoPath', value: selected[0].fsPath });
-                } else {
-                  const found = await findWindhawk();
-                  const selected = found.length
-                    ? await vscode.window.showQuickPick([...found, 'Browse…'], { title: 'Windhawk installation' })
-                    : 'Browse…';
-                  if (!selected) return;
-                  const installation =
-                    selected === 'Browse…'
-                      ? (
-                          await vscode.window.showOpenDialog({
-                            canSelectFiles: false,
-                            canSelectFolders: true,
-                            canSelectMany: false
-                          })
-                        )?.[0].fsPath
-                      : selected;
-                  if (installation)
-                    await view?.webview.postMessage({ type: 'computerInstallation', value: installation });
-                }
-                return;
-              }
-              if (message.action === 'computerPreferences' || message.action === 'checkElevation') {
-                const settings = message.settings;
-                if (
-                  !settings ||
-                  typeof settings.installationPath !== 'string' ||
-                  typeof settings.gsudoPath !== 'string' ||
-                  !['none', 'sudo', 'gsudo'].includes(settings.elevation) ||
-                  !['cpp', 'clangd', 'both'].includes(settings.integration)
-                )
-                  throw new Error('Invalid computer preferences.');
-                const root = settings.installationPath.trim().replace(/^(['"])(.*)\1$/, '$2');
-                if (root && !path.isAbsolute(root)) throw new Error('Choose an absolute Windhawk installation path.');
-                const preferences: InstallationPreferences = {
-                  elevation: settings.elevation,
-                  gsudoPath: settings.gsudoPath.trim().replace(/^(['"])(.*)\1$/, '$2')
-                };
-                const availability = await inspectElevation(preferences);
-                if (message.action === 'checkElevation') {
-                  await view?.webview.postMessage({ type: 'elevationChecked', message: availability.notice });
-                  return;
-                }
-                if ([...projects.values()].some(project => [...project.entries.values()].some(entry => entry.busy)))
-                  throw new Error('Wait for the current Windhawk operation before changing preferences.');
-                if (root) await fs.access(path.join(root, 'windhawk.ini'));
-                const previous = installationPreferences(localPreferences.computer.installationPath);
-                if (
-                  !sameFile(root, localPreferences.computer.installationPath) ||
-                  previous.elevation !== preferences.elevation ||
-                  previous.gsudoPath !== preferences.gsudoPath
-                )
-                  await closeElevationSessions();
-                if (root) localPreferences.computer.installations[pathKey(root)] = preferences;
-                localPreferences.computer.installationPath = root;
-                localPreferences.computer.integration = settings.integration;
-                await context.globalState.update('localPreferences', localPreferences);
-                for (const project of projects.values()) {
-                  project.editor = await resolveEditor(project.project.root);
-                  await refreshRuntime(project);
-                  await refreshDraft(project);
-                }
-                publish();
-                await view?.webview.postMessage({ type: 'computerSaved' });
-                return;
-              }
-              const state = projects.get(message.root);
-              if (message.action === 'restore' && !message.entry) {
-                await restore();
-                return;
-              }
-              if (!state) throw new Error('Select a project first.');
-              selectedRoot = state.project.root;
-              const entry = state.entries.get(message.entry);
-              if (message.action === 'openFolder') {
-                await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(state.project.root), false);
-                return;
-              }
-              if (message.action === 'refreshGit') {
-                state.git = await gitStatus(state.project.root, gitExecutable());
-                publish();
-                return;
-              }
-              if (message.action === 'sourceControl') {
-                await vscode.commands.executeCommand('workbench.view.scm');
-                return;
-              }
-              if (message.action === 'gitSetup') {
-                await setupProject(state.project.root, { git: gitExecutable() });
-                state.git = await gitStatus(state.project.root, gitExecutable());
-                publish();
-                return;
-              }
-              if (message.action === 'projectPreferences') {
-                const settings = message.settings;
-                if (!settings || !['default', 'cpp', 'clangd', 'both'].includes(settings.integration))
-                  throw new Error('Invalid local project preferences.');
-                if ([...state.entries.values()].some(entry => entry.busy))
-                  throw new Error('Wait for the current Windhawk operation before changing preferences.');
-                await setProjectPreference(
-                  state.project.root,
-                  settings.integration !== 'default' ? { integration: settings.integration } : {}
-                );
-                state.editor = await resolveEditor(state.project.root);
-                await refreshRuntime(state);
-                await refreshDraft(state);
-                publish();
-                await view?.webview.postMessage({ type: 'projectPreferencesSaved' });
-                return;
-              }
-              if (message.action === 'editor' || message.action === 'reviewEditor') {
-                const integration =
-                  message.settings?.integration ?? projectPreferences(state.project.root).integration ?? 'default';
-                if (!['default', 'cpp', 'clangd', 'both'].includes(integration))
-                  throw new Error('Choose a valid C++ language service.');
-                const settings = {
-                  ...state.editor,
-                  integration: integration === 'default' ? localPreferences.computer.integration : integration,
-                  indentStyle: message.settings?.indentStyle,
-                  indentSize: message.settings?.indentSize
-                };
-                if (await applyEditor(state, settings, message.action === 'reviewEditor')) {
-                  await setProjectPreference(state.project.root, integration === 'default' ? {} : { integration });
-                  state.editor = await resolveEditor(state.project.root);
-                  await refreshEditorConfiguration(state);
-                  publish();
-                  await view?.webview.postMessage({ type: 'editorSaved', root: state.project.root });
-                } else if (message.action === 'reviewEditor')
-                  await view?.webview.postMessage({ type: 'editorReviewed', root: state.project.root });
-                return;
-              }
-              if (message.action === 'select') {
-                await rememberProject(state.project.root);
-                publish();
-                return;
-              }
-              if (message.action === 'config') {
-                await updateConfig(state, message.config);
-                await view?.webview.postMessage({ type: 'saved', root: state.project.root });
-                return;
-              }
-              if (message.action === 'generateAll') {
-                if (await saveRelevant(state)) await enqueue(state);
-                return;
-              }
-              if (!entry) throw new Error('Select a valid mod entry.');
-              switch (message.action) {
-                case 'details':
-                  await showDetails(state, entry);
-                  break;
-                case 'compile':
-                  await compileMod(state, entry);
-                  break;
-                case 'testCompile':
-                  await compileMod(state, entry, true);
-                  break;
-                case 'stopCompile': {
-                  const owner = entry.abort
-                    ? entry
-                    : entry.runtime?.id
-                      ? installedOperations.get(installedModKey(state.editor.installationPath, entry.runtime.id))
-                      : undefined;
-                  if (owner?.abort && !owner.abort.signal.aborted) {
-                    owner.stopping = true;
-                    if (owner.runtime) owner.runtime.stopping = true;
-                    owner.abort.abort();
-                    publish();
-                  }
-                  break;
-                }
-                case 'enable':
-                  if (typeof message.enabled === 'boolean') await enableMod(state, entry, message.enabled);
-                  break;
-                default:
-                  await runModAction(state, entry, message.action, message.line);
-              }
+              await routeSidebarMessage(message);
             } catch (error) {
               log.appendLine(String(error));
-              await view?.webview.postMessage({
+              await postToSidebar({
                 type: 'error',
                 action: message?.action,
                 root: message?.root,
