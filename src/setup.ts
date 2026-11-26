@@ -136,6 +136,33 @@ export async function gitStatus(
   }
 }
 
+export const localEditorFiles = ['.vscode/settings.json', '.vscode/c_cpp_properties.json', '.clangd'];
+
+export async function trackedEditorFiles(root: string, git = 'git'): Promise<string[]> {
+  try {
+    const { stdout } = await run(
+      git,
+      ['-C', root, 'ls-files', '-z', '--', ...localEditorFiles.map(file => ':(literal)' + file)],
+      {
+        windowsHide: true,
+        env: { ...process.env, LC_ALL: 'C' }
+      }
+    );
+    const tracked = stdout.split('\0');
+    return localEditorFiles.filter(file => tracked.includes(file));
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException & { stderr?: string };
+    if (failure.code === 'ENOENT' || failure.stderr?.startsWith('fatal: not a git repository')) return [];
+    throw error;
+  }
+}
+
+export async function stopTrackingEditorFiles(root: string, files: string[], git = 'git'): Promise<void> {
+  await run(git, ['-C', root, 'rm', '--cached', '--', ...files.map(file => ':(literal)' + file)], {
+    windowsHide: true
+  });
+}
+
 /** Initialize Git only when no enclosing repository exists, then append managed ignore rules. */
 export async function setupProject(
   root: string,
@@ -163,9 +190,7 @@ export async function setupProject(
   }
   await appendIgnoreRules(project, [
     ...(options.ignoreOutput !== false ? [`/${project.config.outputDirectory}/`] : []),
-    '/.vscode/settings.json',
-    '/.vscode/c_cpp_properties.json',
-    '/.clangd'
+    ...localEditorFiles.map(file => '/' + file)
   ]);
   return { ...project, gitInitialized };
 }
@@ -313,7 +338,7 @@ export async function editorConfiguration(
       );
     return { text, value };
   };
-  const edit = (source: string, updates: [string[], unknown][]): string => {
+  const edit = (source: string, updates: [(string | number)[], unknown][]): string => {
     for (const [keys, value] of updates)
       source = applyEdits(
         source,
@@ -481,20 +506,21 @@ export async function editorConfiguration(
       [['C_Cpp.intelliSenseEngine'], input.integration === 'clangd' ? 'disabled' : 'default']
     ]);
     settings = edit(settings, [[['clangd.enable'], input.integration !== 'cpp']]);
-    const { text: extensions, value: parsedExtensions } = await readJsonObject('.vscode/extensions.json');
-    const recommendations = parsedExtensions.recommendations ?? [];
-    if (!Array.isArray(recommendations)) throw new Error('extensions.recommendations must be an array.');
-    const needed =
-      input.integration === 'cpp'
-        ? ['ms-vscode.cpptools']
-        : input.integration === 'clangd'
-          ? ['llvm-vs-code-extensions.vscode-clangd']
-          : ['ms-vscode.cpptools', 'llvm-vs-code-extensions.vscode-clangd'];
-    result.set(
-      '.vscode/extensions.json',
-      Buffer.from(edit(extensions, [[['recommendations'], [...new Set([...recommendations, ...needed])]]]))
-    );
   }
+  const { text: extensions, value: parsedExtensions } = await readJsonObject('.vscode/extensions.json');
+  const recommendations = parsedExtensions.recommendations ?? [];
+  if (!Array.isArray(recommendations)) throw new Error('extensions.recommendations must be an array.');
+  const missing = ['ms-vscode.cpptools', 'llvm-vs-code-extensions.vscode-clangd'].filter(
+    id => !recommendations.includes(id)
+  );
+  // Append rather than rewrite the array, so comments inside it survive.
+  const updatedExtensions = Array.isArray(parsedExtensions.recommendations)
+    ? edit(
+        extensions,
+        missing.map(id => [['recommendations', -1], id])
+      )
+    : edit(extensions, [[['recommendations'], missing]]);
+  result.set('.vscode/extensions.json', Buffer.from(updatedExtensions));
   result.set('.vscode/settings.json', Buffer.from(settings));
   return result;
 }

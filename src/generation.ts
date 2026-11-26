@@ -153,7 +153,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       const output = previous.output;
       try {
         const existing = await fs.readFile(output);
-        if (previous.ownedHash === checksum(existing) && !host.isDirty(output)) {
+        if (ownedOutput(existing, previous, state.project.root) && !host.isDirty(output)) {
           await assertSafeDestination(state.project.root, portableRelative(state.project.root, output));
           if (state.removed) return;
           await fs.rm(output);

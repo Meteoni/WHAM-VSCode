@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Applying editor settings recommends both Microsoft C/C++ and clangd in the shared project file, regardless of your language service choice.
+- WHAM removes unchanged outputs when their source entries are deleted, even if you opened the project in a different VS Code workspace.
+- Applying editor settings warns when Git tracks files with this computer's Windhawk paths. **Stop tracking** stages their removal and keeps the files on disk.
 - WHAM reads each project's C++ language service from its editor files. **Settings → Editor** shows the configured service and writes the selected service when you apply changes. The default in **Extension settings** applies only to projects whose editor files configure no service.
 - The sidebar updates only the mod cards that changed. Open compile menus, the mod page's More menu, the project list and keyboard focus are no longer reset by updates about other mods; a card that does change keeps its open menu and focused control.
 - Generated outputs omit `generate` and `debounceMs`. Switching between after-save and manual generation, or changing the debounce, no longer rewrites every output or marks installed mods as uncompiled. Existing outputs regenerate once after upgrading, so compiled mods show as uncompiled until they're compiled again. Recovered projects use the current VS Code generation settings, with defaults for settings you haven't set.
