@@ -1104,6 +1104,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         path.join(state.project.root, 'windhawk-amalgamation.json'),
         Buffer.from(JSON.stringify(config, null, 2) + '\n')
       );
+      // Generated output stays out of Git wherever it moves, as setup arranged for the first one.
+      if (config.outputDirectory !== state.project.config.outputDirectory)
+        await appendIgnoreRules(temporaryProject, [`/${config.outputDirectory}/`]);
       state.project = temporaryProject;
       // Directory changes need fresh entry ownership and dependency state.
       if (state.timer) clearTimeout(state.timer);

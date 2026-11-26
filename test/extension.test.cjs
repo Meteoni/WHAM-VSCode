@@ -513,6 +513,12 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     watchers[0].delete(Uri.file(one));
     await settle(() => project()?.entries.length === 1);
     assert.ok((await fs.readFile(oneOutput, 'utf8')).includes('shared = 99'));
+    // A new output directory is ignored like the one setup created; existing rules stay.
+    await receive({ action: 'config', root, config: { ...defaults, debounceMs: 10, outputDirectory: 'build' } });
+    await receive({ action: 'config', root, config: { ...defaults, debounceMs: 10 } });
+    const ignoreLines = (await fs.readFile(path.join(root, '.gitignore'), 'utf8')).split(/\r?\n/);
+    assert.ok(ignoreLines.includes('/build/'));
+    assert.equal(ignoreLines.filter(line => line === '/output/').length, 1);
     // Command actions go directly to the only mod.
     mock.window.showQuickPick = async () => {
       throw new Error('A single mod does not need a picker');
