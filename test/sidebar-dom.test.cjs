@@ -35,7 +35,7 @@ const entry = (name, changes = {}) => ({
 const stateMessage = (entries, choices = [{ label: 'Mods', description: 'Recent project', detail: root, root }]) => ({
   type: 'state',
   selected: root,
-  computer: { installationPath: '', integration: 'cpp', installations: {} },
+  computer: { installationPath: '', integration: 'cpp', elevation: 'none', gsudoPath: '' },
   openAfterSetup: true,
   createInitialCommit: false,
   projectChoices: [...choices, { label: 'Browse for a project folder…', description: '', detail: '', root: '' }],

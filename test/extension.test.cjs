@@ -303,7 +303,12 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
         integration: 'clangd'
       }
     });
-    const savedComputer = structuredClone(globalStored.localPreferences.computer),
+    // Computer preferences are user-level VS Code settings.
+    assert.equal(vscodeSettings['wham.windhawkPath'], path.join(root, 'installation'));
+    assert.equal(vscodeSettings['wham.languageService'], 'clangd');
+    assert.equal(settingTargets['wham.languageService'], mock.ConfigurationTarget.Global);
+    assert.equal(vscodeSettings['wham.elevation'], undefined, 'Defaults are not written');
+    const savedComputer = structuredClone(vscodeSettings),
       closesBeforeCheck = elevationCloses;
     await receive({
       action: 'checkElevation',
@@ -314,7 +319,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
         integration: 'cpp'
       }
     });
-    assert.deepEqual(globalStored.localPreferences.computer, savedComputer);
+    assert.deepEqual(vscodeSettings, savedComputer, 'Checking elevation saves nothing');
     assert.equal(elevationCloses, closesBeforeCheck);
     const elevationSettings = {
       installationPath: path.join(root, 'installation'),
@@ -337,11 +342,9 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       }
     });
     assert.equal(elevationCloses, closesBeforeCheck + 2);
-    assert.equal(globalStored.localPreferences.computer.installationPath, path.join(root, 'installation'));
-    assert.equal(
-      globalStored.localPreferences.computer.installations[path.join(root, 'installation').toLowerCase()].gsudoPath,
-      'another-gsudo'
-    );
+    assert.equal(vscodeSettings['wham.windhawkPath'], path.join(root, 'installation'));
+    assert.equal(vscodeSettings['wham.gsudoPath'], 'another-gsudo');
+    assert.equal(vscodeSettings['wham.elevation'], 'gsudo');
     await receive({
       action: 'computerPreferences',
       settings: { ...elevationSettings, elevation: 'none', gsudoPath: '' }
@@ -350,6 +353,17 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     assert.equal(project().editor.installationPath, path.join(root, 'installation'));
     assert.equal(project().editor.integration, 'clangd');
     assert.deepEqual(globalStored.localPreferences.projects[root], {});
+    // Edits in the Settings editor apply too: a new default language service, and a new
+    // elevation method closing the previous approval.
+    const closesBeforeHandEdit = elevationCloses;
+    await mock.workspace.getConfiguration('wham').update('languageService', 'both', mock.ConfigurationTarget.Global);
+    await settle(() => project().editor.integration === 'both');
+    await mock.workspace.getConfiguration('wham').update('elevation', 'sudo', mock.ConfigurationTarget.Global);
+    await settle(() => project().elevation === 'sudo');
+    assert.equal(elevationCloses, closesBeforeHandEdit + 1);
+    await mock.workspace.getConfiguration('wham').update('elevation', 'none', mock.ConfigurationTarget.Global);
+    await mock.workspace.getConfiguration('wham').update('languageService', 'clangd', mock.ConfigurationTarget.Global);
+    await settle(() => project().editor.integration === 'clangd' && project().elevation === 'none');
     const filesAfterPreferences = await Promise.all(
       ['windhawk-amalgamation.json', '.vscode/settings.json', '.vscode/c_cpp_properties.json'].map(file =>
         fs.readFile(path.join(root, file))

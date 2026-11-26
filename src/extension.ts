@@ -33,14 +33,20 @@ import {
   dependsOn,
   EntryState,
   localModId,
-  pathKey,
   projectSummary,
   ProjectState,
   sameFile
 } from './projects';
 import { createDetailsView, DetailsData } from './details';
 import { checkModBuild } from './compiler';
-import { InstallationPreferences, loadLocalPreferences } from './preferences';
+import {
+  ComputerPreferences,
+  computerSettings,
+  InstallationPreferences,
+  loadLocalPreferences,
+  migrateComputerPreferences,
+  readComputerPreferences
+} from './preferences';
 import {
   appendIgnoreRules,
   createInitialCommit,
@@ -96,8 +102,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.textDocuments.some(document => document.isDirty && sameFile(document.uri.fsPath, file));
   const projectPreferences = (root: string) =>
     localPreferences.projects[Object.keys(localPreferences.projects).find(key => sameFile(key, root)) ?? root] ?? {};
-  const installationPreferences = (root: string): InstallationPreferences =>
-    localPreferences.computer.installations[pathKey(root)] ?? { elevation: 'none', gsudoPath: '' };
+  await migrateComputerPreferences(context.globalState, localPreferences, {
+    isSet: setting => vscode.workspace.getConfiguration('wham').inspect(setting)?.globalValue !== undefined,
+    set: (setting, value) =>
+      vscode.workspace.getConfiguration('wham').update(setting, value, vscode.ConfigurationTarget.Global)
+  });
+  /** Computer-wide preferences, from VS Code settings. */
+  const computer = () => readComputerPreferences(setting => vscode.workspace.getConfiguration('wham').get(setting));
+  /** Nonzero while WHAM writes computer settings; the caller applies them once afterwards. */
+  let savingComputer = 0;
+  /** Write the preferences that differ to user settings; `machine` scope keeps paths off Settings Sync. */
+  const saveComputer = async (next: Partial<ComputerPreferences>) => {
+    const current = computer();
+    savingComputer++;
+    try {
+      for (const key of Object.keys(next) as (keyof ComputerPreferences)[])
+        if (next[key] !== undefined && next[key] !== current[key])
+          await vscode.workspace
+            .getConfiguration('wham')
+            .update(computerSettings[key], next[key], vscode.ConfigurationTarget.Global);
+    } finally {
+      savingComputer--;
+    }
+  };
+  const installationPreferences = (): InstallationPreferences => {
+    const { elevation, gsudoPath } = computer();
+    return { elevation, gsudoPath };
+  };
   /** Replace a project's local preference entry, whatever casing it was stored under. */
   const setProjectPreference = async (root: string, preference: { integration?: EditorSettings['integration'] }) => {
     const previousKey = Object.keys(localPreferences.projects).find(key => sameFile(key, root));
@@ -110,8 +141,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const overrides = projectPreferences(root);
     return {
       ...formatting,
-      installationPath: localPreferences.computer.installationPath,
-      integration: overrides.integration ?? localPreferences.computer.integration
+      installationPath: computer().installationPath,
+      integration: overrides.integration ?? computer().integration
     };
   };
   /** A timing value set in user, workspace or folder settings, with the level that holds it. */
@@ -192,7 +223,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     enqueue: (state, targets) => enqueue(state, targets),
     refreshDraft: (state, entries) => refreshDraft(state, entries),
     refreshEditorConfiguration: state => refreshEditorConfiguration(state),
-    installationPreferences: root => installationPreferences(root),
+    installationPreferences,
     compiledSnapshots: () => context.globalState.get<Record<string, CompiledSnapshot>>('compiledSnapshots', {}),
     saveCompiledSnapshots: builds => context.globalState.update('compiledSnapshots', builds),
     tools: { inspectWindhawk, readInstalledMod, runWindhawkCli, runWindhawkProcess, checkModBuild }
@@ -244,7 +275,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       type: 'state',
       selected: state?.project.root,
       page: pendingSidebarPage,
-      computer: localPreferences.computer,
+      computer: computer(),
       openAfterSetup: openAfterSetup(),
       createInitialCommit: initialCommitEnabled(),
       projectChoices: projectChoices(),
@@ -256,7 +287,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         editor: item.editor,
         editorNeedsApply: item.editorNeedsApply,
         local: projectPreferences(item.project.root),
-        elevation: installationPreferences(item.editor.installationPath).elevation,
+        elevation: computer().elevation,
         git: item.git,
         windhawk: item.windhawk,
         opened: !!vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, item.project.root)),
@@ -338,6 +369,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   const { relevantDirty, reconcileOutput, scheduleRefresh, refresh, enqueue } = pipeline;
   const changed = (file: string, discovery = false) => pipeline.changed(projects.values(), file, discovery);
+  let appliedComputer = computer(),
+    computerQueue: Promise<void> = Promise.resolve();
+  /**
+   * Bring every project up to date with the computer preferences, wherever they were changed:
+   * the sidebar, editor setup, or the Settings editor. Runs one change at a time.
+   */
+  const applyComputerPreferences = () => {
+    const run = computerQueue.then(async () => {
+      const previous = appliedComputer,
+        next = computer();
+      if (JSON.stringify(previous) === JSON.stringify(next)) return;
+      appliedComputer = next;
+      if (
+        !sameFile(previous.installationPath, next.installationPath) ||
+        previous.elevation !== next.elevation ||
+        previous.gsudoPath !== next.gsudoPath
+      )
+        await closeElevationSessions();
+      for (const project of projects.values()) {
+        project.editor = await resolveEditor(project.project.root);
+        await refreshRuntime(project);
+        await refreshDraft(project);
+      }
+      publish();
+    });
+    computerQueue = run.catch(() => {});
+    return run;
+  };
   /** After loading, or switching to After save, catch up on what manual mode left stale. */
   const generateStale = (state: ProjectState) => {
     if (timing(state).generate !== 'onSave') return;
@@ -542,19 +601,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!Object.keys(localPreferences.projects).some(key => sameFile(key, root))) {
       // Adopt a usable old installation only if none is selected globally.
       const applied = await readEditorSettings(root);
-      if (!localPreferences.computer.installationPath && applied.installationPath) {
+      if (!computer().installationPath && applied.installationPath) {
+        let usable = false;
         try {
           await fs.access(path.join(applied.installationPath, 'windhawk.ini'));
-          localPreferences.computer.installationPath = applied.installationPath;
+          usable = true;
         } catch {
           /* A copied project's path may not exist on this computer. */
         }
-        if (localPreferences.computer.installationPath)
-          for (const project of projects.values()) {
-            project.editor = await resolveEditor(project.project.root);
-            await refreshRuntime(project);
-            await refreshDraft(project);
-          }
+        if (usable) {
+          await saveComputer({ installationPath: applied.installationPath });
+          await applyComputerPreferences();
+        }
       }
       localPreferences.projects[root] = applied.installationPath ? { integration: applied.integration } : {};
       await context.globalState.update('localPreferences', localPreferences);
@@ -1094,7 +1152,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         settings.indentSize = Number(width);
       }
     }
-    if (settings.installationPath && settings.installationPath !== localPreferences.computer.installationPath) {
+    if (settings.installationPath && settings.installationPath !== computer().installationPath) {
       if ([...projects.values()].some(project => [...project.entries.values()].some(entry => entry.busy)))
         throw new Error('Wait for the current Windhawk operation before changing preferences.');
       // Validate before saving a newly selected installation as a computer preference.
@@ -1103,13 +1161,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         settings,
         (await inspectWindhawk(settings.installationPath)).compileFlags
       );
-      localPreferences.computer.installationPath = settings.installationPath;
-      await context.globalState.update('localPreferences', localPreferences);
-      for (const project of projects.values()) {
-        project.editor = await resolveEditor(project.project.root);
-        await refreshRuntime(project);
-        await refreshDraft(project);
-      }
+      await saveComputer({ installationPath: settings.installationPath });
+      await applyComputerPreferences();
     }
     if ((await applyEditor(state, settings)) && !indentationOnly && settings.integration !== state.editor.integration) {
       await setProjectPreference(state.project.root, { integration: settings.integration });
@@ -1322,7 +1375,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Sidebar protocol: parsing and dispatch live in sidebar.ts; these are the operations.
   const postToSidebar = (message: unknown) => view?.webview.postMessage(message);
   const unquote = (value: string) => value.trim().replace(/^(['"])(.*)\1$/, '$2');
-  const readComputerPreferences = (settings: ComputerPreferencesInput) => {
+  const readComputerForm = (settings: ComputerPreferencesInput) => {
     const root = unquote(settings.installationPath);
     if (root && !path.isAbsolute(root)) throw new Error('Choose an absolute Windhawk installation path.');
     const preferences: InstallationPreferences = {
@@ -1333,29 +1386,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   const anyBusy = (states: Iterable<ProjectState>) =>
     [...states].some(project => [...project.entries.values()].some(entry => entry.busy));
+  /** The sidebar checks the choices before they reach settings; the Settings editor cannot. */
   const saveComputerPreferences = async (settings: ComputerPreferencesInput) => {
-    const { root, preferences } = readComputerPreferences(settings);
+    const { root, preferences } = readComputerForm(settings);
     await inspectElevation(preferences);
     if (anyBusy(projects.values()))
       throw new Error('Wait for the current Windhawk operation before changing preferences.');
     if (root) await fs.access(path.join(root, 'windhawk.ini'));
-    const previous = installationPreferences(localPreferences.computer.installationPath);
-    if (
-      !sameFile(root, localPreferences.computer.installationPath) ||
-      previous.elevation !== preferences.elevation ||
-      previous.gsudoPath !== preferences.gsudoPath
-    )
-      await closeElevationSessions();
-    if (root) localPreferences.computer.installations[pathKey(root)] = preferences;
-    localPreferences.computer.installationPath = root;
-    localPreferences.computer.integration = settings.integration;
-    await context.globalState.update('localPreferences', localPreferences);
-    for (const project of projects.values()) {
-      project.editor = await resolveEditor(project.project.root);
-      await refreshRuntime(project);
-      await refreshDraft(project);
-    }
-    publish();
+    await saveComputer({ installationPath: root, ...preferences, integration: settings.integration });
+    await applyComputerPreferences();
     await postToSidebar({ type: 'computerSaved' });
   };
   const browseComputerInstallation = async () => {
@@ -1379,7 +1418,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const integration = message.integration ?? projectPreferences(state.project.root).integration ?? 'default';
     const settings = {
       ...state.editor,
-      integration: integration === 'default' ? localPreferences.computer.integration : integration,
+      integration: integration === 'default' ? computer().integration : integration,
       indentStyle: message.indentStyle as EditorSettings['indentStyle'],
       indentSize: message.indentSize as number
     };
@@ -1430,7 +1469,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
       browseComputerInstallation,
       checkElevation: async message => {
-        const availability = await inspectElevation(readComputerPreferences(message.settings).preferences);
+        const availability = await inspectElevation(readComputerForm(message.settings).preferences);
         await postToSidebar({ type: 'elevationChecked', message: availability.notice });
       },
       computerPreferences: message => saveComputerPreferences(message.settings),
@@ -1570,8 +1609,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         publish();
       }
     }),
-    // Timing changed from the sidebar, the toggle command, or the Settings editor.
     vscode.workspace.onDidChangeConfiguration(event => {
+      // Edits in the Settings editor; WHAM's own writes apply once they are all written.
+      if (
+        !savingComputer &&
+        Object.values(computerSettings).some(setting => event.affectsConfiguration('wham.' + setting))
+      )
+        applyComputerPreferences().catch(error => log.appendLine(String(error)));
+      // Timing changed from the sidebar, the toggle command, or the Settings editor.
       if (!event.affectsConfiguration('wham.generate') && !event.affectsConfiguration('wham.debounceMs')) return;
       for (const state of projects.values())
         if (timing(state).generate === 'manual') {

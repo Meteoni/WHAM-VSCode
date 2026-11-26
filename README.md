@@ -36,7 +36,7 @@ If you edit generated output, WHAM pauses regeneration so your changes aren't ov
 
 The preview works without Windhawk. Compilation and installed-mod controls need a compatible Windhawk 2.0 CLI. See the [user guide](docs/guide.md) for configuration, CLI commands, and supported C++ constructs.
 
-Standard Windhawk installs need elevation for compilation and installed-mod changes. Choose **Windows sudo** (may require more prompts) or **gsudo** (once per VS Code session) under **Extension settings**. WHAM detects gsudo on PATH or in Scoop. **None** uses VS Code's current permissions. Saving local preferences does not change project files; **Apply editor settings** does.
+Standard Windhawk installs need elevation for compilation and installed-mod changes. Choose **Windows sudo** (may require more prompts) or **gsudo** (once per VS Code session) under **Extension settings**. WHAM detects gsudo on PATH or in Scoop. **None** uses VS Code's current permissions. Extension settings are saved as VS Code user settings (`wham.windhawkPath`, `wham.elevation`, `wham.gsudoPath`, `wham.languageService`), so you can also change them in the Settings editor. The paths and elevation method stay on this computer and aren't synced. Saving them doesn't change project files; **Apply editor settings** does.
 
 ## Building
 

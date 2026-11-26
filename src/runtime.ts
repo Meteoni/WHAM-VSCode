@@ -45,7 +45,8 @@ export interface RuntimeHost {
   enqueue(state: ProjectState, targets: string[]): Promise<void>;
   refreshDraft(state: ProjectState, entries?: EntryState[]): Promise<void>;
   refreshEditorConfiguration(state: ProjectState): Promise<void>;
-  installationPreferences(root: string): InstallationPreferences;
+  /** How to elevate Windhawk CLI calls; one choice for the selected installation. */
+  installationPreferences(): InstallationPreferences;
   compiledSnapshots(): Record<string, CompiledSnapshot>;
   saveCompiledSnapshots(builds: Record<string, CompiledSnapshot>): PromiseLike<unknown>;
   tools: RuntimeTools;
@@ -237,7 +238,7 @@ export function createRuntimeOperations(host: RuntimeHost) {
         source,
         text => log.append(text),
         abort.signal,
-        host.installationPreferences(root)
+        host.installationPreferences()
       );
       if (result.id !== modId) throw new Error('Windhawk returned an unexpected compiled mod ID.');
       const library = result.config?.libraryFileName;
@@ -316,7 +317,7 @@ export function createRuntimeOperations(host: RuntimeHost) {
         undefined,
         undefined,
         abort.signal,
-        host.installationPreferences(root)
+        host.installationPreferences()
       );
       if (result?.id !== modId || result.enabled !== enabled)
         throw new Error('Windhawk returned an unsupported enable/disable response. Update Windhawk.');

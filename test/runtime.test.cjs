@@ -181,7 +181,9 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     documents = [],
     stored = {},
     problems = new Map(),
-    notices = [];
+    notices = [],
+    vscodeSettings = {};
+  let onSettings;
   const globalStored = {
     localPreferences: {
       version: 1,
@@ -241,8 +243,19 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     workspace: {
       workspaceFolders: [{ uri: Uri.file(root) }],
       textDocuments: documents,
-      getConfiguration: () => ({ get: () => undefined, inspect: () => undefined }),
-      onDidChangeConfiguration: disposable,
+      // User-level settings; the stored preferences above migrate into them on activation.
+      getConfiguration: section => ({
+        get: key => vscodeSettings[section + '.' + key],
+        inspect: key => ({ globalValue: vscodeSettings[section + '.' + key] }),
+        async update(key, value) {
+          vscodeSettings[section + '.' + key] = value;
+          onSettings?.({ affectsConfiguration: name => name === section + '.' + key });
+        }
+      }),
+      onDidChangeConfiguration(fn) {
+        onSettings = fn;
+        return disposable();
+      },
       registerTextDocumentContentProvider: disposable,
       createFileSystemWatcher() {
         const watcher = {
@@ -871,7 +884,7 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     assert.ok(detailViews.at(-1).data.source.includes('int shared = 7'));
     await detailViews.at(-1).callbacks.onNavigate('project');
     // The optional custom compiler follows the same reveal policy.
-    globalStored.localPreferences.computer.installationPath = '';
+    await mock.workspace.getConfiguration('wham').update('windhawkPath', '');
     await receive({ action: 'projectPreferences', root, settings: { integration: 'default' } });
     mock.window.showInputBox = async options =>
       options.title === 'Compiler executable' ? 'fixture-compiler.exe' : JSON.stringify(['-fsyntax-only']);

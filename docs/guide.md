@@ -22,7 +22,18 @@ In the C++ editor, Windhawk metadata fields, README Markdown, and settings YAML 
 
 ## Windhawk integration
 
-Select your installation in **Settings → Editor**. WHAM uses the local core for metadata, Markdown/settings parsing, and baseline compiler flags. It retains its source locations for diagnostics and source navigation.
+Select your installation in **Settings → Editor** or **Extension settings**.
+
+**Extension settings** apply to every project on this computer. They're VS Code user settings, and edits made in the Settings editor take effect immediately:
+
+| Setting | Sidebar field | Synced by Settings Sync |
+|---|---|---|
+| `wham.windhawkPath` | Windhawk installation | No |
+| `wham.elevation` | Elevation method | No |
+| `wham.gsudoPath` | Custom gsudo path | No |
+| `wham.languageService` | Default C++ language service | Yes |
+
+The elevation method is one choice for whichever installation is selected. Earlier versions kept these preferences in extension storage, with elevation saved per installation. On first start, WHAM copies them into the settings, using the selected installation's elevation method, and doesn't overwrite settings you've already set. WHAM uses the local core for metadata, Markdown/settings parsing, and baseline compiler flags. It retains its source locations for diagnostics and source navigation.
 
 Each mod card keeps **Generate** and **Source** on the left, with **Compile** on the right. The **Enabled** switch sits beside the source-file count, and an amber tools icon appears beside the output status when compilation is needed. A muted question mark means WHAM cannot confirm the installed build’s source. Hover over the icons or output pill for their meaning. Compile regenerates saved source first and submits that fixed snapshot through `mod install --file -`. New local mods install disabled as `local@<id>`; existing builds preserve their enabled state. Generation remains independent and never installs a mod by itself. Edited output is protected and must be resolved before compilation.
 
@@ -88,7 +99,7 @@ The named Microsoft C/C++ configuration is **Windhawk (WHAM)**. Select it throug
 
 Spaces/tabs and a width from 1–16 are configurable per project in the sidebar. Settings update C++ editor indentation and `.clang-format`; existing formatting options and JSONC comments are preserved. New formatting starts with Windhawk's Chromium base. Metadata and `WHAM` comments are protected from comment reflow. Formatting source is supported; formatting an amalgamated output can change generated guard sections and break automatic recovery, so keep generated sections intact.
 
-Editor changes to existing files are shown in a review picker with diffs. Dirty settings buffers block application. Preferences persist across folder switches, and opening a project reads its applied JSONC and formatting configuration to populate the sidebar. Saved changes to those files also refresh the displayed preferences without replacing unapplied form edits. Installation paths are stored locally and are absent from the recovery manifest. Machine-specific editor files receive Git ignore rules; already tracked files remain tracked by Git. Output is excluded from project search, and clangd background indexing skips generated copies. Source/include-directory changes can be synchronized by applying editor settings again.
+Editor changes to existing files are shown in a review picker with diffs. Dirty settings buffers block application. Preferences persist across folder switches, and opening a project reads its applied JSONC and formatting configuration to populate the sidebar. Saved changes to those files also refresh the displayed preferences without replacing unapplied form edits. The installation path is a `machine`-scoped user setting, `wham.windhawkPath`, so Settings Sync doesn't copy it to other computers. Recovery manifests never contain it. Machine-specific editor files receive Git ignore rules; already tracked files remain tracked by Git. Output is excluded from project search, and clangd background indexing skips generated copies. Source/include-directory changes can be synchronized by applying editor settings again.
 
 **Test build** compiles and links saved source into temporary DLLs with the selected Windhawk compiler and engine import libraries. It follows `@architecture` and `@compilerOptions`, then removes the DLLs. It does not install or load the result, change Enabled, or establish a compiled-source baseline. It uses baseline Windhawk build flags; installation-only compatibility exceptions and precompiled-header caches remain Windhawk’s responsibility.
 

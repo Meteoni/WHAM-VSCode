@@ -110,7 +110,7 @@ const { parse } = require('jsonc-parser');
     ];
     const state = {
       type: 'state',
-      computer: { installationPath: 'C:/Windhawk', integration: 'cpp', installations: {} },
+      computer: { installationPath: 'C:/Windhawk', integration: 'cpp', elevation: 'none', gsudoPath: '' },
       openAfterSetup: true,
       selected: root,
       projectChoices: choices,
