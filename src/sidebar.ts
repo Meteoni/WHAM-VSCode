@@ -27,11 +27,10 @@ export type GlobalMessage =
 /** Actions on the selected project. */
 export type ProjectMessage =
   | { action: 'openFolder' | 'refreshGit' | 'sourceControl' | 'gitSetup' | 'select' | 'generateAll' }
-  | { action: 'projectPreferences'; integration: Integration | 'default' }
   | {
       action: 'editor' | 'reviewEditor';
-      /** Undefined keeps the project's saved preference. */
-      integration?: Integration | 'default';
+      /** Undefined keeps the project's current service. */
+      integration?: Integration;
       indentStyle: unknown;
       indentSize: unknown;
     }
@@ -67,7 +66,6 @@ const projectActions = new Set([
   'gitSetup',
   'select',
   'generateAll',
-  'projectPreferences',
   'editor',
   'reviewEditor',
   'config'
@@ -140,23 +138,17 @@ export function parseSidebarMessage(raw: unknown): SidebarMessage | undefined {
   if (projectActions.has(action)) {
     const root = raw.root;
     switch (action) {
-      case 'projectPreferences': {
-        const integration = isRecord(raw.settings) ? raw.settings.integration : undefined;
-        if (integration !== 'default' && !integrations.includes(integration as string))
-          throw new Error('Invalid local project preferences.');
-        return { scope: 'project', root, action, integration: integration as Integration | 'default' };
-      }
       case 'editor':
       case 'reviewEditor': {
         const settings = isRecord(raw.settings) ? raw.settings : {};
         const integration = settings.integration ?? undefined;
-        if (integration !== undefined && integration !== 'default' && !integrations.includes(integration as string))
+        if (integration !== undefined && !integrations.includes(integration as string))
           throw new Error('Choose a valid C++ language service.');
         return {
           scope: 'project',
           root,
           action,
-          integration: integration as Integration | 'default' | undefined,
+          integration: integration as Integration | undefined,
           indentStyle: settings.indentStyle,
           indentSize: settings.indentSize
         };
@@ -167,10 +159,7 @@ export function parseSidebarMessage(raw: unknown): SidebarMessage | undefined {
         return {
           scope: 'project',
           root,
-          action: action as Exclude<
-            ProjectMessage['action'],
-            'projectPreferences' | 'editor' | 'reviewEditor' | 'config'
-          >
+          action: action as Exclude<ProjectMessage['action'], 'editor' | 'reviewEditor' | 'config'>
         };
     }
   }

@@ -35,7 +35,7 @@ const entry = (name, changes = {}) => ({
 const stateMessage = (entries, choices = [{ label: 'Mods', description: 'Recent project', detail: root, root }]) => ({
   type: 'state',
   selected: root,
-  computer: { installationPath: '', integration: 'cpp', installations: {} },
+  computer: { installationPath: '', integration: 'cpp', elevation: 'none', gsudoPath: '' },
   openAfterSetup: true,
   createInitialCommit: false,
   projectChoices: [...choices, { label: 'Browse for a project folder…', description: '', detail: '', root: '' }],
@@ -46,7 +46,6 @@ const stateMessage = (entries, choices = [{ label: 'Mods', description: 'Recent 
       config,
       editor: { installationPath: '', integration: 'cpp', indentStyle: 'spaces', indentSize: 4 },
       editorNeedsApply: false,
-      local: {},
       elevation: 'none',
       opened: true,
       retained: [],
@@ -74,6 +73,39 @@ function sidebar() {
     );
   return { dom, document, posted, post, card };
 }
+
+test('the project editor form shows and applies the service reported by the project', () => {
+  const { dom, document, posted, post } = sidebar();
+  const state = stateMessage([]);
+  state.projects[0].editor.integration = 'clangd';
+  post(state);
+  document.querySelector('[data-page="settings"]').click();
+  const form = document.getElementById('editor-config');
+  const integration = form.elements.namedItem('integration');
+  const apply = document.getElementById('apply-editor');
+  assert.deepEqual(
+    [...integration.options].map(option => option.value),
+    ['cpp', 'clangd', 'both']
+  );
+  assert.equal(integration.value, 'clangd');
+  assert.equal(document.querySelector('#computer-config [name="integration"]').value, 'cpp');
+  assert.equal(apply.disabled, true);
+
+  integration.value = 'both';
+  integration.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  assert.equal(apply.disabled, false);
+  form.requestSubmit(apply);
+  assert.equal(posted.at(-1).action, 'editor');
+  assert.equal(posted.at(-1).root, root);
+  assert.equal(posted.at(-1).settings.integration, 'both');
+
+  const applied = stateMessage([]);
+  applied.projects[0].editor.integration = 'both';
+  post(applied);
+  post({ type: 'editorSaved', root });
+  assert.equal(integration.value, 'both');
+  assert.equal(apply.disabled, true);
+});
 
 test('updates about other mods leave a card, its open menu and focus untouched', () => {
   const { document, post, card } = sidebar();

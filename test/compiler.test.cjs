@@ -56,6 +56,10 @@ test('Test build resolves UTF-16 installation paths, links declared architecture
       assert.ok(call.args.includes('-DWH_WINDHAWK_VERSION=0x02000000'));
       assert.ok(call.args.includes('-DTEST=a b'));
       assert.ok(call.args.includes('-shared'));
+      // Windhawk's install compile: these warnings suppressed, and the DLL stripped.
+      assert.ok(call.args.includes('-Wno-unneeded-internal-declaration'));
+      assert.ok(call.args.includes('-Wno-deprecated-declarations'));
+      assert.ok(call.args.includes('-s'));
       assert.ok(call.args.some(arg => arg.startsWith(path.join(root, 'Engine/2.0.0')) && arg.endsWith('windhawk.lib')));
       assert.equal(call.input, source);
       assert.equal(await fs.stat(call.options.cwd).catch(() => undefined), undefined, 'Scratch folder is removed');
@@ -71,11 +75,30 @@ test('Test build resolves UTF-16 installation paths, links declared architecture
       assert.ok(call.args.includes('-fsyntax-only'));
       assert.ok(!call.args.includes('-shared'));
       assert.ok(!call.args.includes('-o'));
-      for (const flag of calls[index].args.filter(arg => arg.startsWith('-D') || arg === '-O2'))
+      assert.ok(!call.args.includes('-s'));
+      for (const flag of calls[index].args.filter(
+        arg => arg.startsWith('-D') || arg.startsWith('-Wno-') || arg === '-O2'
+      ))
         assert.ok(call.args.includes(flag), 'Shared flag: ' + flag);
       assert.ok(call.args.includes('-lcomctl32'));
       assert.equal(call.input, source);
       assert.equal(await fs.stat(call.options.cwd).catch(() => undefined), undefined);
+    }
+    // A mod that asks for debug info keeps its symbols; -g0 turns debug info off again.
+    for (const [debugOptions, stripped] of [
+      ['-g', false],
+      ['-lcomctl32 -ggdb3', false],
+      ['-g0', true]
+    ]) {
+      const before = calls.length;
+      await check(
+        root,
+        source.replace('-lcomctl32 -DTEST="a b"', debugOptions),
+        new AbortController().signal,
+        () => {},
+        '2.0.0-alpha.7'
+      );
+      for (const call of calls.slice(before)) assert.equal(call.args.includes('-s'), stripped, debugOptions);
     }
     warnings = true;
     assert.deepEqual(await check(root, source, new AbortController().signal, () => {}, '2.0.0-alpha.7', true), {

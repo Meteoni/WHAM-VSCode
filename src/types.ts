@@ -17,6 +17,11 @@ export interface Configuration {
   generate: 'onSave' | 'manual';
   debounceMs: number;
 }
+/**
+ * When the extension generates. The `wham.generate` and `wham.debounceMs` VS Code settings
+ * hold it; `generate`/`debounceMs` in older project files are the fallback.
+ */
+export type GenerationTiming = Pick<Configuration, 'generate' | 'debounceMs'>;
 export interface FileAccess {
   read(path: string): Promise<Buffer>;
   identity(path: string): Promise<string>;

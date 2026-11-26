@@ -9,7 +9,7 @@ Edit directory-based C++ sources, generate one standalone `.wh.cpp` per mod, and
 3. Apply the editor setup summary, customize it, or skip it. WHAM reuses your preferences and selects a single detected Windhawk installation automatically. Change these later under **Settings → Editor**.
 4. **Open project after setup** is enabled by default and opens the folder in the current window, activating its editor configuration. You can clear this checkbox or disable `wham.openProjectAfterSetup` in VS Code settings. Install the recommended C++ language extension if it is missing.
 
-New projects get `src/`, `output/`, `windhawk-amalgamation.json`, and a Git repository when there is no enclosing repository. Ignore rules cover output, `.vscode/settings.json`, `.vscode/c_cpp_properties.json`, and `.clangd`. Source, portable rebuild configuration, `.clang-format`, extension recommendations, and `.gitignore` remain shareable. Existing ignore rules and repositories are preserved; already tracked files stay tracked. **Create initial Git commit** is opt-in (default off, also configurable with `wham.createInitialCommit`). It applies to new or recovered projects only when WHAM creates the repository, after editor setup. The commit includes setup files and recovered sources; it excludes generated output and machine-specific settings. Existing repositories and staged changes are left alone. WHAM uses your configured Git identity and never pushes. If committing fails, the project still opens; check the WHAM log and commit from Source Control after fixing Git configuration. **Settings → Git** explains the policy, updates ignore rules for older projects, refreshes Git status, and opens Source Control.
+New projects get `src/`, `output/`, `windhawk-amalgamation.json`, and a Git repository when there is no enclosing repository. Ignore rules cover output, `.vscode/settings.json`, `.vscode/c_cpp_properties.json`, and `.clangd`. Moving the output directory in **Settings → Generation** adds a rule for the new folder. Source, portable rebuild configuration, `.clang-format`, extension recommendations, and `.gitignore` remain shareable. Existing ignore rules and repositories are preserved; already tracked files stay tracked. **Create initial Git commit** is opt-in (default off, also configurable with `wham.createInitialCommit`). It applies to new or recovered projects only when WHAM creates the repository, after editor setup. The commit includes setup files and recovered sources; it excludes generated output and machine-specific settings. Existing repositories and staged changes are left alone. WHAM uses your configured Git identity and never pushes. If committing fails, the project still opens; check the WHAM log and commit from Source Control after fixing Git configuration. **Settings → Git** explains the policy, updates ignore rules for older projects, refreshes Git status, and opens Source Control.
 
 **Open project** lists up to 15 recent project folders across VS Code sessions, with their paths, plus **Browse for a project folder…**. With no history, it goes directly to the folder picker. Missing folders/configurations are removed from the list. Existing WHAM projects open directly without editor setup, configuration review, or Git changes. The Active project dropdown uses the same recent-project list and Browse option as the picker in Setup. Select a project to open its folder, or Browse to choose another source folder.
 
@@ -22,7 +22,18 @@ In the C++ editor, Windhawk metadata fields, README Markdown, and settings YAML 
 
 ## Windhawk integration
 
-Select your installation in **Settings → Editor**. WHAM uses the local core for metadata, Markdown/settings parsing, and baseline compiler flags. It retains its source locations for diagnostics and source navigation.
+Select your installation in **Settings → Editor** or **Extension settings**.
+
+**Extension settings** apply to every project on this computer. They're VS Code user settings, and edits made in the Settings editor take effect immediately:
+
+| Setting | Sidebar field | Synced by Settings Sync |
+|---|---|---|
+| `wham.windhawkPath` | Windhawk installation | No |
+| `wham.elevation` | Elevation method | No |
+| `wham.gsudoPath` | Custom gsudo path | No |
+| `wham.languageService` | Default C++ language service | Yes |
+
+The elevation method is one choice for whichever installation is selected. Earlier versions kept these preferences in extension storage, with elevation saved per installation. On first start, WHAM copies them into the settings, using the selected installation's elevation method, and doesn't overwrite settings you've already set. WHAM uses the local core for metadata, Markdown/settings parsing, and baseline compiler flags. It retains its source locations for diagnostics and source navigation.
 
 Each mod card keeps **Generate** and **Source** on the left, with **Compile** on the right. The **Enabled** switch sits beside the source-file count, and an amber tools icon appears beside the output status when compilation is needed. A muted question mark means WHAM cannot confirm the installed build’s source. Hover over the icons or output pill for their meaning. Compile regenerates saved source first and submits that fixed snapshot through `mod install --file -`. New local mods install disabled as `local@<id>`; existing builds preserve their enabled state. Generation remains independent and never installs a mod by itself. Edited output is protected and must be resolved before compilation.
 
@@ -65,13 +76,16 @@ Include boundaries use short readable comments, such as `// WHAM@5 begin 1: src/
   "exclude": [],
   "includeDirectories": ["src"],
   "externalIncludes": [],
-  "inlineAngleIncludes": false,
-  "generate": "onSave",
-  "debounceMs": 250
+  "inlineAngleIncludes": false
 }
 ```
 
-Entry and exclusion globs are relative to `sourceDirectory`. Other directories are relative to the project root and must use portable forward-slash paths. Quoted includes search the including file's directory first, then configured include directories in order. There is no basename search. `externalIncludes` lists exact quoted header names or complete macro expressions to preserve as external. Angle includes remain external unless local angle expansion is enabled.
+Entry and exclusion globs are relative to `sourceDirectory`. Other directories are relative to the project root and must use portable forward-slash paths. Quoted includes search the including file's directory first, then configured include directories in order. There is no basename search. `externalIncludes` lists exact quoted header names or complete macro expressions to preserve as external. Angle includes remain external unless local angle expansion is enabled. When WHAM generates is a VS Code setting rather than part of the project:
+
+- `wham.generate` controls After save (`onSave`) or Manual. **Settings → Generation** and **WHAM: Toggle Generate on Save** write to folder settings for projects opened as workspace folders. For other projects, they update the setting that currently applies or use user settings if there is no override.
+- `wham.debounceMs` controls the wait after a save. **Settings → Generation** updates a workspace value if one applies, or writes to user settings otherwise.
+
+Both can also be changed in the VS Code Settings editor. Older projects may still list `generate` and `debounceMs` in `windhawk-amalgamation.json`. WHAM uses those values until the settings are set, and drops them when it saves changes to the project layout. Generated outputs omit both values. Switching to After save also regenerates stale outputs from saved sources.
 
 All branches are preserved. Missing quoted includes inside `#if 0` still require a file or explicit external rule. Ordinary guards and repeatable headers retain compiler-controlled behavior. Conventional leading, unconditional `#pragma once` becomes a reversible per-file guard. After a full expansion reached without enclosing conditionals, later includes of that same file become compact references to its body. References preserve the exact original directives for recovery. Conditional ancestry is tracked through nested includes; an uncertain earlier include does not justify deduplication. Ordinary macro guards and all existing defines remain untouched. Retained copies that differ still require recovery conflict resolution.
 
@@ -79,13 +93,15 @@ All branches are preserved. Missing quoted includes inside `#if 0` still require
 
 **Apply editor settings** applies directly. **Review changes…** optionally opens a diff without writing files. Apply creates or updates configuration for Microsoft C/C++, clangd, or both. It uses your selected installation's `Compiler/bin/clang++.exe`, `Compiler/include/windhawk_api.h`, C++23, the x64 MinGW target, Windows version defines, `WH_MOD`, and `WH_EDITING`. This resolves Windhawk-only API declarations while authoring. The language-service extension itself must be installed; WHAM creates extension recommendations without installing extensions automatically.
 
+The project editor form shows the C++ language service configured in the project's editor files. If those files configure no service, including after indentation-only setup on a new project, the form shows the **Default C++ language service** from **Extension settings** (`wham.languageService`). Changing that default only affects the displayed service for projects without a configured service. To switch a configured project, choose a service in the project form and apply it.
+
 Detection checks `WINDHAWK_HOME`, both Windows registry views, Program Files, `<home>/Portable Programs/Windhawk`, and `<home>/scoop/apps/windhawk/current`. The portable paths are fixed layout guesses using the current user's home directory; WHAM does not scan the disk or hard-code a username. Every candidate must contain the compiler and API header. Saved preferences and existing project compiler settings can also supply the path. You can always browse to a custom installation.
 
 The named Microsoft C/C++ configuration is **Windhawk (WHAM)**. Select it through **C/C++: Select a Configuration** if your editor remains on another configuration. clangd configuration uses Windhawk's own `clangd.exe` and a managed fragment in `.clangd`. Choosing clangd disables the Microsoft C/C++ IntelliSense engine for the project to avoid competing diagnostics. Configuring both prepares both services; choose one as your primary provider.
 
 Spaces/tabs and a width from 1–16 are configurable per project in the sidebar. Settings update C++ editor indentation and `.clang-format`; existing formatting options and JSONC comments are preserved. New formatting starts with Windhawk's Chromium base. Metadata and `WHAM` comments are protected from comment reflow. Formatting source is supported; formatting an amalgamated output can change generated guard sections and break automatic recovery, so keep generated sections intact.
 
-Editor changes to existing files are shown in a review picker with diffs. Dirty settings buffers block application. Preferences persist across folder switches, and opening a project reads its applied JSONC and formatting configuration to populate the sidebar. Saved changes to those files also refresh the displayed preferences without replacing unapplied form edits. Installation paths are stored locally and are absent from the recovery manifest. Machine-specific editor files receive Git ignore rules; already tracked files remain tracked by Git. Output is excluded from project search, and clangd background indexing skips generated copies. Source/include-directory changes can be synchronized by applying editor settings again.
+Editor changes to existing files are shown in a review picker with diffs. Dirty settings buffers block application. Opening a project reads its editor and formatting configuration to populate the sidebar. Saved changes to those files refresh the displayed settings without replacing unapplied form edits. The language service travels with the editor files when you copy the project. WHAM adds Git ignore rules for machine-specific editor files, so a fresh clone only includes those files if they were tracked. The installation path is a `machine`-scoped user setting, `wham.windhawkPath`, so Settings Sync doesn't copy it to other computers. Recovery manifests never contain it. Apply editor settings again to update toolchain paths on the new computer or after changing source/include directories. Output is excluded from project search, and clangd background indexing skips generated copies.
 
 **Test build** compiles and links saved source into temporary DLLs with the selected Windhawk compiler and engine import libraries. It follows `@architecture` and `@compilerOptions`, then removes the DLLs. It does not install or load the result, change Enabled, or establish a compiled-source baseline. It uses baseline Windhawk build flags; installation-only compatibility exceptions and precompiled-header caches remain Windhawk’s responsibility.
 

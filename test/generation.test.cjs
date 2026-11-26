@@ -48,7 +48,8 @@ async function project(files, config = {}) {
     },
     refreshRuntime: async () => {},
     refreshEditorConfiguration: async () => {},
-    editorFilesChanged: async () => {}
+    editorFilesChanged: async () => {},
+    timing: state => ({ generate: state.project.config.generate, debounceMs: state.project.config.debounceMs })
   };
   pipeline = createGenerationPipeline(host, hashes);
   const state = {
@@ -156,6 +157,37 @@ test('saves within the debounce coalesce and regenerate only dependent entries',
   }
 });
 
+test('switching to Manual skips automatic generation already queued by a save', async () => {
+  const p = await project(sources);
+  let releaseQueue;
+  try {
+    await p.pipeline.enqueue(p.state);
+    const before = await p.read('output/a.wh.cpp');
+    const blockedQueue = new Promise(resolve => {
+      releaseQueue = resolve;
+    });
+    p.state.queue = blockedQueue;
+    await p.write('src/shared.h', '#pragma once\nint shared = 2;\n');
+    p.pipeline.changed([p.state], p.at('src/shared.h'));
+    await new Promise(resolve => setTimeout(resolve, p.state.project.config.debounceMs));
+    assert.notEqual(p.state.queue, blockedQueue, 'The debounce already handed the save to the queue');
+
+    p.state.project.config.generate = 'manual';
+    await p.write('src/shared.h', '#pragma once\nint shared = 5;\n');
+    releaseQueue();
+    await p.state.queue;
+    assert.equal(await p.read('output/a.wh.cpp'), before, 'Queued automatic work must not write the Manual save');
+
+    await p.pipeline.enqueue(p.state, [p.at('src/a.cpp')]);
+    assert.match(await p.read('output/a.wh.cpp'), /int shared = 5;/, 'Explicit generation still works in Manual mode');
+  } finally {
+    clearTimeout(p.state.timer);
+    releaseQueue?.();
+    await p.state.queue;
+    await p.cleanup();
+  }
+});
+
 test('outputs changed on disk are flagged, and new entries are discovered', async () => {
   const p = await project(sources);
   try {
@@ -171,6 +203,29 @@ test('outputs changed on disk are flagged, and new entries are discovered', asyn
     assert.equal(p.entry('src/c.cpp').status, 'current');
     assert.match(await p.read('output/c.wh.cpp'), /int c;/);
   } finally {
+    await p.cleanup();
+  }
+});
+
+test('switching to Manual while an automatic output is staged leaves the output unchanged', async () => {
+  const p = await project(sources);
+  const writeFile = fs.writeFile;
+  try {
+    await p.pipeline.enqueue(p.state);
+    const output = p.at('output/a.wh.cpp');
+    const before = await p.read('output/a.wh.cpp');
+    await p.write('src/shared.h', '#pragma once\nint shared = 2;\n');
+    fs.writeFile = async (file, ...args) => {
+      await writeFile(file, ...args);
+      if (file.startsWith(output + '.') && file.endsWith('.tmp')) p.state.project.config.generate = 'manual';
+    };
+    await p.pipeline.enqueue(p.state, [p.at('src/a.cpp')], { automatic: true });
+    assert.equal(p.state.project.config.generate, 'manual');
+    assert.equal(await p.read('output/a.wh.cpp'), before);
+    assert.equal(p.entry('src/a.cpp').status, 'stale');
+    assert.deepEqual(await fs.readdir(p.at('output')), ['a.wh.cpp', 'b.wh.cpp']);
+  } finally {
+    fs.writeFile = writeFile;
     await p.cleanup();
   }
 });

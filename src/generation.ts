@@ -13,6 +13,7 @@ import {
 } from './io';
 import { parseMetadata } from './metadata';
 import { dependsOn, EntryState, ownedOutput, ProjectState, sameFile } from './projects';
+import { GenerationTiming } from './types';
 
 /**
  * What the generation pipeline needs from its environment. The extension implements it
@@ -42,6 +43,8 @@ export interface GenerationHost {
   refreshEditorConfiguration(state: ProjectState): Promise<void>;
   /** An editor configuration file in the project changed on disk. */
   editorFilesChanged(state: ProjectState): Promise<void>;
+  /** When this project generates: after saves or manually, and the debounce. */
+  timing(state: ProjectState): GenerationTiming;
 }
 
 /** Editor configuration files WHAM generates; changes to them refresh editor state only. */
@@ -177,8 +180,10 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
   };
 
   /** Generate one entry from saved files and write it unless that would lose output edits. */
-  const generate = async (state: ProjectState, entry: EntryState, force: boolean) => {
-    if (stopped(state)) return;
+  const generate = async (state: ProjectState, entry: EntryState, force: boolean, automatic = false) => {
+    // The mode can change while work is queued or while it reads the saved files.
+    const canGenerate = () => !stopped(state) && (!automatic || host.timing(state).generate === 'onSave');
+    if (!canGenerate()) return;
     const output = outputPath(state.project, entry.path);
     if (host.isDirty(output)) {
       entry.status = 'blocked';
@@ -221,6 +226,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       return;
     }
     if (!(await inputsUnchanged(result.dependencies)) || relevantDirty(state, entry).length) {
+      if (!canGenerate()) return;
       entry.status = 'pending';
       entry.message = 'Source changed during generation; queued another pass.';
       schedule(state, [entry.path]);
@@ -232,8 +238,10 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       entry.message = 'Output changed during generation; no write performed.';
       return;
     }
-    if (stopped(state)) return;
-    if (!existing?.equals(result.bytes)) await writeOutput(state.project, output, result.bytes);
+    if (!canGenerate()) return;
+    // Manual mode may be selected while the replacement is staged or waiting on a file lock.
+    if (!existing?.equals(result.bytes) && !(await writeOutput(state.project, output, result.bytes, canGenerate)))
+      return;
     entry.ownedHash = checksum(result.bytes);
     storedHashes[output] = entry.ownedHash;
     entry.status = 'current';
@@ -247,7 +255,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
   const enqueue = (
     state: ProjectState,
     targets?: string[],
-    options: { force?: boolean; refreshProject?: boolean } = {}
+    options: { force?: boolean; refreshProject?: boolean; automatic?: boolean } = {}
   ): Promise<void> => {
     state.queue = state.queue.then(async () => {
       if (stopped(state)) return;
@@ -257,7 +265,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
         for (const entry of entries) state.draftPending.delete(entry.path);
         for (const entry of entries) {
           try {
-            await generate(state, entry, options.force ?? false);
+            await generate(state, entry, options.force ?? false, options.automatic);
           } catch (error) {
             entry.status = 'stale';
             entry.message = String(error);
@@ -277,7 +285,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
     return state.queue;
   };
 
-  /** Debounce generation of `targets` by the project's debounceMs. */
+  /** Debounce generation of `targets` by the project's debounce. */
   const schedule = (state: ProjectState, targets: string[]) => {
     if (stopped(state)) return;
     for (const target of targets) {
@@ -286,11 +294,12 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       state.draftPending.delete(target);
     }
     if (state.timer) clearTimeout(state.timer);
+    const { generate: mode, debounceMs } = host.timing(state);
     state.timer = setTimeout(() => {
       const targets = [...state.pending];
       state.pending.clear();
-      void enqueue(state, targets, { refreshProject: false });
-    }, state.project.config.debounceMs);
+      void enqueue(state, targets, { refreshProject: false, automatic: mode === 'onSave' });
+    }, debounceMs);
   };
 
   /**
@@ -351,7 +360,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
             const affected = [...state.entries.values()].filter(
               entry => configurationChanged || !entry.draft || targets.includes(entry)
             );
-            if (state.project.config.generate === 'onSave')
+            if (host.timing(state).generate === 'onSave')
               schedule(
                 state,
                 affected.map(entry => entry.path)
@@ -363,7 +372,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
           host.publish();
         });
       } else if (targets.length) {
-        if (state.project.config.generate === 'onSave')
+        if (host.timing(state).generate === 'onSave')
           schedule(
             state,
             targets.map(entry => entry.path)

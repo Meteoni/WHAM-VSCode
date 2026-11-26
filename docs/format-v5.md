@@ -2,6 +2,8 @@
 
 WHAM 1.7.0 generates v5 and reads v1 through v5. Project configuration remains `formatVersion: 1`. Include and transform records follow [v4](format-v4.md), with `WHAM@5` boundaries and manifest `version: 5`. The foldable recovery footer retains its 120-character physical line limit.
 
+The manifest `config` omits `generate` and `debounceMs`, which don't affect output. Recovery fills any missing configuration field with its default. Earlier v5 outputs still contain both fields; WHAM 1.7.0 and newer read both forms.
+
 ## Header-guard proof
 
 WHAM recognizes one top-level `#ifndef NAME` block followed immediately by an object-like `#define NAME`, allowing comments and whitespace between them. The block must have a matching `#endif` and no outer `#else` or `#elif`. Nested conditionals are allowed. Multiple recognized top-level guard blocks are left unchanged. More elaborate guard spellings are not recognized.

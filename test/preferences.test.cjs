@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadLocalPreferences } = require('../dist/preferences');
+const { loadLocalPreferences, migrateComputerPreferences, readComputerPreferences } = require('../dist/preferences');
 
 test('legacy choices migrate to one local installation and project language preferences', async () => {
   const globalData = {
@@ -71,4 +71,79 @@ test('without a global installation migration adopts the most recent project cho
   );
   assert.equal(preferences.computer.installationPath, 'C:/two');
   assert.deepEqual(preferences.projects, { one: {}, two: {} });
+});
+
+test('stored computer preferences move into settings once, without overriding or writing defaults', async () => {
+  const data = {};
+  const global = {
+    get: key => data[key],
+    update: async (key, value) => {
+      data[key] = value;
+    }
+  };
+  const preferences = {
+    version: 2,
+    computer: {
+      installationPath: 'C:/Windhawk',
+      integration: 'cpp',
+      installations: { 'c:\\windhawk': { elevation: 'gsudo', gsudoPath: 'C:/tools/gsudo.exe' } }
+    },
+    projects: {}
+  };
+  const settings = { gsudoPath: 'C:/chosen/gsudo.exe' },
+    writes = [];
+  const access = {
+    isSet: setting => settings[setting] !== undefined,
+    set: async (setting, value) => {
+      writes.push(setting);
+      settings[setting] = value;
+    }
+  };
+  await migrateComputerPreferences(global, preferences, access);
+  // The selected installation's elevation carries over; a gsudo path already set wins.
+  assert.deepEqual(settings, { windhawkPath: 'C:/Windhawk', elevation: 'gsudo', gsudoPath: 'C:/chosen/gsudo.exe' });
+  assert.deepEqual(writes, ['windhawkPath', 'elevation'], 'The default language service is not written');
+  // Later activations leave settings alone, even after the user clears one.
+  delete settings.windhawkPath;
+  await migrateComputerPreferences(global, preferences, access);
+  assert.equal(settings.windhawkPath, undefined);
+});
+
+test('hand-edited computer settings of the wrong kind read as defaults', () => {
+  const read = values => readComputerPreferences(setting => values[setting]);
+  assert.deepEqual(read({}), { installationPath: '', elevation: 'none', gsudoPath: '', integration: 'cpp' });
+  assert.deepEqual(
+    read({ windhawkPath: '  C:/Windhawk ', elevation: 'runas', gsudoPath: 7, languageService: 'both' }),
+    {
+      installationPath: 'C:/Windhawk',
+      elevation: 'none',
+      gsudoPath: '',
+      integration: 'both'
+    }
+  );
+});
+
+test('computer migration skips invalid stored values and normalizes valid ones', async () => {
+  const data = {};
+  const preferences = {
+    computer: {
+      installationPath: '  C:/Windhawk  ',
+      integration: 'default',
+      installations: { 'c:\\windhawk': { elevation: 'runas', gsudoPath: '  C:/tools/gsudo.exe  ' } }
+    }
+  };
+  await migrateComputerPreferences(
+    { get: key => data[key], update: async (key, value) => (data[key] = value) },
+    { ...preferences, computer: { ...preferences.computer, installationPath: 42 } },
+    { isSet: () => false, set: async () => assert.fail('Invalid preferences should not be written') }
+  );
+  delete data.computerPreferencesMigrated;
+  const settings = {};
+  await migrateComputerPreferences(
+    { get: key => data[key], update: async (key, value) => (data[key] = value) },
+    preferences,
+    { isSet: () => false, set: async (key, value) => (settings[key] = value) }
+  );
+  assert.deepEqual(settings, { windhawkPath: 'C:/Windhawk', gsudoPath: 'C:/tools/gsudo.exe' });
+  assert.equal(data.computerPreferencesMigrated, true);
 });

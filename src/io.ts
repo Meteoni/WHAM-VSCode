@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { contained, defaults, portablePath, portableRelative, validateConfig } from './config';
+import { contained, defaults, layoutConfig, portablePath, portableRelative, validateConfig } from './config';
 import { checksum } from './engine';
 import { FileAccess, Project, RestoreResult } from './types';
 
@@ -83,9 +83,11 @@ export async function initializeProject(root: string): Promise<Project> {
   await fs.mkdir(path.join(root, project.config.sourceDirectory), { recursive: true });
   await fs.mkdir(path.join(root, project.config.outputDirectory), { recursive: true });
   try {
-    await fs.writeFile(path.join(root, 'windhawk-amalgamation.json'), JSON.stringify(project.config, null, 2) + '\n', {
-      flag: 'wx'
-    });
+    await fs.writeFile(
+      path.join(root, 'windhawk-amalgamation.json'),
+      JSON.stringify(layoutConfig(project.config), null, 2) + '\n',
+      { flag: 'wx' }
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   }
@@ -125,7 +127,12 @@ export async function assertSafeDestination(root: string, relative: string): Pro
   return target;
 }
 
-export async function writeOutput(project: Project, output: string, bytes: Buffer): Promise<void> {
+export async function writeOutput(
+  project: Project,
+  output: string,
+  bytes: Buffer,
+  canCommit?: () => boolean
+): Promise<boolean> {
   await assertSafeDestination(project.root, portableRelative(project.root, output));
   await fs.mkdir(path.dirname(output), { recursive: true });
   const temporary = output + '.' + randomUUID() + '.tmp';
@@ -133,9 +140,10 @@ export async function writeOutput(project: Project, output: string, bytes: Buffe
   try {
     await fs.writeFile(temporary, bytes, { flag: 'wx' });
     for (let attempt = 0; ; attempt++) {
+      if (canCommit && !canCommit()) return false;
       try {
         await fs.rename(temporary, output);
-        break;
+        return true;
       } catch (error) {
         // Windows readers and indexers can briefly prevent an atomic replacement.
         if (
@@ -168,7 +176,10 @@ export async function commitRestore(
     if (selected === undefined || !candidates[selected]) throw new Error(`Unresolved recovery conflict: ${file}`);
     contents.set(file, candidates[selected].bytes);
   }
-  contents.set('windhawk-amalgamation.json', Buffer.from(JSON.stringify(result.manifest.config, null, 2) + '\n'));
+  contents.set(
+    'windhawk-amalgamation.json',
+    Buffer.from(JSON.stringify(layoutConfig(result.manifest.config), null, 2) + '\n')
+  );
   const existing = new Map<string, Buffer | undefined>();
   for (const [relative, bytes] of contents) {
     const previous = await readIfExists(await assertSafeDestination(destination, relative));

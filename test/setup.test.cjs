@@ -11,6 +11,7 @@ const {
   setupProject,
   createInitialCommit,
   gitStatus,
+  editorDefaults,
   editorConfiguration,
   readEditorSettings,
   mergeRecoveries,
@@ -121,13 +122,14 @@ test('editor configuration resolves Windhawk APIs and preserves existing JSONC a
     );
     await fs.rm(path.join(root, '.vscode/settings.json'));
     await fs.rm(path.join(root, '.vscode/c_cpp_properties.json'));
-    const formattingOnly = await readEditorSettings(root, editor);
+    const formattingOnly = await readEditorSettings(root);
     assert.equal(formattingOnly.indentSize, 3);
     assert.equal(formattingOnly.indentStyle, 'tabs');
-    assert.equal(formattingOnly.installationPath, installation);
+    assert.equal(formattingOnly.installationPath, '');
+    assert.equal(formattingOnly.integration, undefined);
     await fs.writeFile(path.join(root, '.vscode/settings.json'), '{broken');
     await fs.writeFile(path.join(root, '.clang-format'), 'IndentWidth: [broken');
-    assert.deepEqual(await readEditorSettings(root, editor), editor);
+    assert.deepEqual(await readEditorSettings(root), { ...editorDefaults, integration: undefined });
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -323,6 +325,11 @@ test('editor service transitions activate only the selected services and preserv
       assert.ok(settings['clangd.arguments'].includes('--log=verbose'));
       assert.equal((await readEditorSettings(root)).integration, integration);
     }
+    await fs.writeFile(
+      path.join(root, '.vscode/settings.json'),
+      JSON.stringify({ 'C_Cpp.intelliSenseEngine': 'disabled', 'clangd.enable': false })
+    );
+    assert.equal((await readEditorSettings(root)).integration, undefined, 'Neither configured service is enabled');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

@@ -70,7 +70,7 @@ function updateEditorActions() {
   const project = state.projects.find(project => project.root === currentRoot);
   editorDirty =
     !!project &&
-    (editorForm.elements.namedItem('integration').value !== (project.local?.integration ?? 'default') ||
+    (editorForm.elements.namedItem('integration').value !== project.editor.integration ||
       editorForm.elements.namedItem('indentStyle').value !== project.editor.indentStyle ||
       Number(editorForm.elements.namedItem('indentSize').value) !== project.editor.indentSize);
   const pending = !!project && (editorDirty || project.editorNeedsApply !== false || editorFailed);
@@ -112,27 +112,12 @@ const readComputerForm = () => ({
     .replace(/^(['"])(.*)\1$/, '$2'),
   integration: computerForm.elements.namedItem('integration').value
 });
-function fillInstallationPreferences(reset = false) {
-  const installation = readComputerForm().installationPath.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
-  if (!reset && computerForm.dataset.installation === installation) return;
-  computerForm.dataset.installation = installation;
-  const computer = state.computer || { installationPath: '', installations: {} };
-  const key = Object.keys(computer.installations).find(
-    key => key.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() === installation
-  );
-  const preference = computer.installations[key] || { elevation: 'none', gsudoPath: '' };
-  computerForm.elements.namedItem('elevation').value = preference.elevation;
-  computerForm.elements.namedItem('gsudoPath').value = preference.gsudoPath;
-}
+const defaultComputer = { installationPath: '', integration: 'cpp', elevation: 'none', gsudoPath: '' };
 computerForm.addEventListener('input', event => {
   updateSaveActions();
   document.getElementById('computer-status').textContent = '';
   document.getElementById('computer-status').classList.remove('danger');
   if (event.target.name === 'elevation') render();
-});
-computerForm.elements.namedItem('installationPath').addEventListener('change', () => {
-  fillInstallationPreferences();
-  render();
 });
 computerForm.addEventListener('submit', event => {
   event.preventDefault();
@@ -166,18 +151,14 @@ function updateSaveActions() {
     configurationSaving ||
     !(configurationDirty || project.error) ||
     ![...form.elements].every(input => !input.validity || input.validity.valid);
-  const computer = state.computer || { installationPath: '', integration: 'cpp', installations: {} };
-  const selectedPath = computer.installationPath.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
-  const key = Object.keys(computer.installations).find(
-    key => key.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() === selectedPath
-  );
-  const preference = computer.installations[key] || { elevation: 'none', gsudoPath: '' },
-    settings = readComputerForm();
+  const computer = state.computer || defaultComputer;
+  const normalize = file => file.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
+  const settings = readComputerForm();
   computerDirty =
-    settings.installationPath.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() !== selectedPath ||
+    normalize(settings.installationPath) !== normalize(computer.installationPath) ||
     settings.integration !== computer.integration ||
-    settings.elevation !== preference.elevation ||
-    settings.gsudoPath !== (preference.gsudoPath ?? '');
+    settings.elevation !== computer.elevation ||
+    settings.gsudoPath !== computer.gsudoPath;
   computerForm.querySelector('[type="submit"]').disabled = !computerDirty || computerSaving;
 }
 form.addEventListener('input', () => {
@@ -547,11 +528,9 @@ function render() {
   form.hidden = settingsScope !== 'project' || settingsPage !== 'generation';
   editorForm.hidden = settingsScope !== 'project' || settingsPage !== 'editor' || !project;
   computerForm.hidden = settingsScope !== 'extension';
-  if (!computerDirty) {
-    computerForm.elements.namedItem('installationPath').value = state.computer?.installationPath ?? '';
-    computerForm.elements.namedItem('integration').value = state.computer?.integration ?? 'cpp';
-    fillInstallationPreferences(true);
-  }
+  if (!computerDirty)
+    for (const [name, value] of Object.entries(state.computer || defaultComputer))
+      computerForm.elements.namedItem(name).value = value;
   const method = computerForm.elements.namedItem('elevation').value;
   document.getElementById('elevation-help').hidden = method !== 'sudo';
   document.getElementById('gsudo-path').hidden = method !== 'gsudo';
@@ -660,13 +639,10 @@ function render() {
     }
   if (project?.editor && !editorDirty)
     for (const [key, value] of Object.entries(project.editor)) {
-      if (['installationPath', 'integration'].includes(key)) continue;
+      if (key === 'installationPath') continue;
       const input = editorForm.elements.namedItem(key);
       if (input) input.value = value;
     }
-  if (project?.editor && !editorDirty) {
-    editorForm.elements.namedItem('integration').value = project.local?.integration ?? 'default';
-  }
   updateEditorActions();
   updateSaveActions();
 }
@@ -757,10 +733,6 @@ window.addEventListener('message', event => {
     editorReviewing = false;
     updateEditorActions();
   }
-  if (event.data.type === 'projectPreferencesSaved') {
-    editorDirty = false;
-    render();
-  }
   if (event.data.type === 'computerSaved') {
     computerSaving = false;
     updateSaveActions();
@@ -770,7 +742,6 @@ window.addEventListener('message', event => {
   }
   if (event.data.type === 'computerInstallation') {
     computerForm.elements.namedItem('installationPath').value = event.data.value;
-    fillInstallationPreferences();
     updateSaveActions();
     render();
   }

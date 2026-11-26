@@ -101,9 +101,18 @@ export async function checkModBuild(
         target.triple,
         '-O2',
         '-mguard=cf-nochecks',
+        // Windhawk's install compile suppresses these, so Test build reports the same warnings.
+        '-Wno-unneeded-internal-declaration',
+        '-Wno-deprecated-declarations',
         ...(syntaxOnly
           ? []
-          : ['-shared', '-Wl,--export-all-symbols', path.join(engineRoot, target.folder, 'windhawk.lib')]),
+          : [
+              '-shared',
+              // Windhawk strips the DLL unless the mod asks for debug info (any -g except -g0).
+              ...(options.some(option => option.startsWith('-g') && option !== '-g0') ? [] : ['-s']),
+              '-Wl,--export-all-symbols',
+              path.join(engineRoot, target.folder, 'windhawk.lib')
+            ]),
         '-x',
         'c++',
         '-',

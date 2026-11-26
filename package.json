@@ -29,6 +29,7 @@
     "build": "tsc -p .",
     "build:bridge": "node scripts/build-bridge.cjs",
     "test": "npm run build && node --test test/*.test.cjs",
+    "test:host": "node test/run-host.cjs",
     "format": "prettier --write \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
     "lint": "eslint src media/*.js test scripts",
@@ -56,6 +57,72 @@
     "configuration": {
       "title": "WHAM",
       "properties": {
+        "wham.generate": {
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "onSave",
+            "manual"
+          ],
+          "enumDescriptions": [
+            "Generate a mod's output after saving any of its source files.",
+            "Generate only from Generate or Generate all."
+          ],
+          "default": "onSave",
+          "description": "When WHAM generates outputs. Set it per project in folder settings. Older projects' `generate` in windhawk-amalgamation.json applies until this is set."
+        },
+        "wham.debounceMs": {
+          "scope": "window",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000,
+          "default": 250,
+          "description": "How long WHAM waits after a save before generating, in milliseconds. Older projects' `debounceMs` in windhawk-amalgamation.json applies until this is set."
+        },
+        "wham.windhawkPath": {
+          "scope": "machine",
+          "type": "string",
+          "default": "",
+          "description": "Windhawk installation folder (the one containing windhawk.ini) used for compiling, installed-mod controls and editor setup. Empty: no installation selected."
+        },
+        "wham.elevation": {
+          "scope": "machine",
+          "type": "string",
+          "enum": [
+            "none",
+            "sudo",
+            "gsudo"
+          ],
+          "enumDescriptions": [
+            "Run Windhawk commands with VS Code's current permissions.",
+            "Windows sudo. May ask for approval more often than gsudo.",
+            "gsudo. Asks for approval once per VS Code session."
+          ],
+          "default": "none",
+          "description": "How WHAM elevates Windhawk commands. Standard Windhawk installs need elevation to compile and change installed mods."
+        },
+        "wham.gsudoPath": {
+          "scope": "machine",
+          "type": "string",
+          "default": "",
+          "description": "Path to gsudo.exe. Empty: find it on PATH or in Scoop."
+        },
+        "wham.languageService": {
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "cpp",
+            "clangd",
+            "both"
+          ],
+          "enumDescriptions": [
+            "Microsoft C/C++.",
+            "clangd, using Windhawk's own clangd.",
+            "Configure both; choose one as your primary provider."
+          ],
+          "default": "cpp",
+          "description": "Default C++ language service for editor setup. A project can choose its own under Settings → Editor."
+        },
         "wham.createInitialCommit": {
           "scope": "application",
           "type": "boolean",

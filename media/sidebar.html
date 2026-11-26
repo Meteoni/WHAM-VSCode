@@ -36,7 +36,7 @@
           <nav id="project-settings-navigation" aria-label="Project settings navigation"><button data-settings="editor">Editor</button><button data-settings="generation">Generation</button><button data-settings="git">Git</button></nav>
           <div id="computer-slot"></div>
           <form id="computer-config" hidden>
-            <p class="muted">These settings apply to all projects on this computer.</p>
+            <p class="muted">These settings apply to all projects on this computer. They're saved in your VS Code user settings.</p>
             <label>Windhawk installation<input name="installationPath" placeholder="Folder containing windhawk.ini"></label>
             <div class="toolbar"><button type="button" data-action="browseComputerInstallation">Browse / detect</button></div>
             <label>Elevation method<select name="elevation"><option value="none">None</option><option value="sudo">Windows sudo</option><option value="gsudo">gsudo</option></select></label>
@@ -53,11 +53,12 @@
             <label>External includes <small>Exact header name or macro expression per line</small><textarea name="externalIncludes" rows="2"></textarea></label>
             <label>Generation<select name="generate"><option value="onSave">After save</option><option value="manual">Manual</option></select></label>
             <label>Debounce (ms)<input name="debounceMs" type="number" min="0" max="10000" step="1"></label>
+            <p class="muted">Generation and debounce are saved in your VS Code settings, not the project file.</p>
             <label class="checkbox"><input name="inlineAngleIncludes" type="checkbox"> Expand local angle includes</label>
             <button type="submit" class="primary">Save configuration</button><p id="settings-status" role="status"></p>
           </form>
           <form id="editor-config">
-            <label>C++ language service<select name="integration"><option value="default">Use default</option><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
+            <label>C++ language service<select name="integration"><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
             <label>Indentation<select name="indentStyle"><option value="spaces">Spaces</option><option value="tabs">Tabs</option></select></label>
             <label>Tab width<input name="indentSize" type="number" min="1" max="16" value="4" required></label>
             <div class="toolbar"><button type="submit" class="primary" id="apply-editor" title="Apply editor settings. Writes editor configuration and .clang-format.">Apply</button><button type="submit" data-editor-review title="Review proposed editor changes without saving them.">Review…</button></div><p id="editor-status" role="status"></p>

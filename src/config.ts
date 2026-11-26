@@ -81,6 +81,17 @@ export function validateConfig(input: unknown): Configuration {
   return config;
 }
 
+/**
+ * What WHAM writes to a project file or recovery footer: everything except generation timing,
+ * which is a local VS Code setting and would otherwise change every output when it changes.
+ */
+export function layoutConfig(config: Configuration): Partial<Configuration> {
+  const layout: Partial<Configuration> = { ...config };
+  delete layout.generate;
+  delete layout.debounceMs;
+  return layout;
+}
+
 export async function discoverEntries(project: Project, files: FileAccess): Promise<string[]> {
   const source = path.resolve(project.root, project.config.sourceDirectory);
   const entries = (await files.list(source))
