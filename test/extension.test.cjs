@@ -8,7 +8,7 @@ const { execFileSync } = require('node:child_process');
 const { defaults } = require('../dist/config');
 const { restoreSource } = require('../dist/engine');
 
-test('adapter sidebar, serialized saves, dependencies, output protection and config controls', async () => {
+test('adapter sidebar, serialized saves, dependencies, output protection and config controls', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-adapter-'));
   await fs.mkdir(path.join(root, 'src'), { recursive: true });
   await fs.writeFile(path.join(root, 'windhawk-amalgamation.json'), JSON.stringify({ ...defaults, debounceMs: 10 }));
@@ -39,7 +39,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
   await fs.mkdir(path.join(root, 'installation/Compiler/include'), { recursive: true });
   for (const file of ['bin/clang++.exe', 'bin/clangd.exe', 'include/windhawk_api.h'])
     await fs.writeFile(path.join(root, 'installation/Compiler', file), 'fixture');
-  let receive, provider, onSave, onChange, onFolders;
+  let receive, provider, onSave, onChange, onFolders, onWindowStateChange;
   let noInstallations = false,
     singleVerifies = 0,
     elevationCloses = 0;
@@ -64,7 +64,8 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     // VS Code settings as user-level values, and the target of each write.
     vscodeSettings = {},
     settingTargets = {};
-  let onSettings;
+  let onSettings, beforeSettingWrite, beforeInspectInstallation;
+  const workspaceSettings = {};
   const disposable = () => ({ dispose() {} });
   const Uri = {
     file(file) {
@@ -95,13 +96,22 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     workspace: {
       workspaceFolders: [{ uri: Uri.file(root) }],
       textDocuments: documents,
-      getConfiguration: section => ({
-        get: key => vscodeSettings[section + '.' + key],
-        inspect: key => ({ globalValue: vscodeSettings[section + '.' + key] }),
+      getConfiguration: (section, scope) => ({
+        get: key => workspaceSettings[section + '.' + key] ?? vscodeSettings[section + '.' + key],
+        inspect: key => ({
+          globalValue: vscodeSettings[section + '.' + key],
+          workspaceValue: workspaceSettings[section + '.' + key],
+          // VS Code exposes the same settings file at both levels when one folder is open.
+          workspaceFolderValue: scope?.fsPath === root ? workspaceSettings[section + '.' + key] : undefined
+        }),
         async update(key, value, target) {
-          vscodeSettings[section + '.' + key] = value;
-          settingTargets[section + '.' + key] = target;
-          onSettings?.({ affectsConfiguration: name => name === section + '.' + key });
+          const name = section + '.' + key;
+          if (target === 3 && key === 'debounceMs') throw new Error('Window settings cannot target a folder');
+          if (beforeSettingWrite) await beforeSettingWrite(key, value);
+          const settings = target === 2 ? workspaceSettings : vscodeSettings;
+          settings[name] = value;
+          settingTargets[name] = target;
+          onSettings?.({ affectsConfiguration: changed => changed === name });
         }
       }),
       onDidChangeConfiguration(fn) {
@@ -147,6 +157,10 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     window: {
       createOutputChannel: () => ({ ...disposable(), appendLine() {}, append() {}, show() {} }),
       createStatusBarItem: () => ({ ...disposable(), show() {} }),
+      onDidChangeWindowState(fn) {
+        onWindowStateChange = fn;
+        return disposable();
+      },
       registerWebviewViewProvider(id, value) {
         provider = value;
         return disposable();
@@ -191,6 +205,11 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       const windhawk = load.call(this, name, ...args);
       return {
         ...windhawk,
+        inspectWindhawk: async root => {
+          const installation = await windhawk.inspectWindhawk(root);
+          await beforeInspectInstallation?.(root);
+          return installation;
+        },
         inspectElevation: async () => ({ notice: 'fixture ready' }),
         closeElevationSessions: async () => {
           elevationCloses++;
@@ -262,6 +281,42 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     Module._load = load;
   }
   try {
+    await t.test('a rejected computer migration leaves WHAM active and can be retried', async () => {
+      const data = {
+        localPreferences: {
+          ...legacyPreferences,
+          computer: { ...legacyPreferences.computer, integration: 'both' }
+        }
+      };
+      const migrationContext = {
+        ...context,
+        subscriptions: [],
+        globalState: {
+          get: (key, fallback) => data[key] ?? fallback,
+          update: async (key, value) => (data[key] = value)
+        }
+      };
+      const folders = mock.workspace.workspaceFolders;
+      mock.workspace.workspaceFolders = [];
+      beforeSettingWrite = async () => {
+        throw new Error('Cannot write invalid user settings');
+      };
+      try {
+        await extension.activate(migrationContext);
+        assert.ok(commands.has('windhawk.openProject'));
+        assert.equal(data.computerPreferencesMigrated, undefined);
+        for (const subscription of migrationContext.subscriptions.splice(0)) subscription.dispose();
+        beforeSettingWrite = undefined;
+        await extension.activate(migrationContext);
+        assert.equal(vscodeSettings['wham.languageService'], 'both');
+        assert.equal(data.computerPreferencesMigrated, true);
+      } finally {
+        for (const subscription of migrationContext.subscriptions) subscription.dispose();
+        mock.workspace.workspaceFolders = folders;
+        beforeSettingWrite = undefined;
+        delete vscodeSettings['wham.languageService'];
+      }
+    });
     await extension.activate(context);
     provider.resolveWebviewView({
       webview: {
@@ -384,8 +439,99 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     assert.equal(elevationCloses, closesBeforeHandEdit + 1);
     await mock.workspace.getConfiguration('wham').update('elevation', 'none', mock.ConfigurationTarget.Global);
     await mock.workspace.getConfiguration('wham').update('languageService', 'clangd', mock.ConfigurationTarget.Global);
-    await settle(() => project(unconfiguredRoot)?.editor.integration === 'clangd' && project().elevation === 'none');
+    const normalComputerSettings = { ...elevationSettings, elevation: 'none', gsudoPath: '' };
+    await receive({ action: 'computerPreferences', settings: normalComputerSettings });
+    await t.test('a failed computer save applies successful writes and concurrent Settings edits', async () => {
+      beforeSettingWrite = async key => {
+        if (key !== 'gsudoPath') return;
+        await mock.workspace
+          .getConfiguration('wham')
+          .update('languageService', 'both', mock.ConfigurationTarget.Global);
+        throw new Error('User settings changed while WHAM was saving');
+      };
+      const closesBeforeRejectedSave = elevationCloses;
+      await receive({ action: 'computerPreferences', settings: elevationSettings });
+      beforeSettingWrite = undefined;
+      try {
+        assert.equal(messages.at(-1).type, 'error');
+        assert.equal(project(unconfiguredRoot)?.editor.integration, 'both');
+        assert.equal(elevationCloses, closesBeforeRejectedSave + 1);
+      } finally {
+        await receive({ action: 'computerPreferences', settings: normalComputerSettings });
+      }
+    });
+    await t.test('opening a project respects an explicitly cleared Windhawk installation', async openingTest => {
+      await mock.workspace.getConfiguration('wham').update('windhawkPath', '', mock.ConfigurationTarget.Global);
+      const copiedRoot = path.join(root, 'copied');
+      await fs.mkdir(copiedRoot);
+      await fs.cp(path.join(root, '.vscode'), path.join(copiedRoot, '.vscode'), { recursive: true });
+      await fs.writeFile(path.join(copiedRoot, 'windhawk-amalgamation.json'), JSON.stringify(defaults));
+      onFolders({ added: [{ uri: Uri.file(copiedRoot) }], removed: [] });
+      try {
+        await settle(
+          () => project(copiedRoot)?.git !== undefined || project(copiedRoot)?.editorNeedsApply !== undefined
+        );
+        assert.equal(vscodeSettings['wham.windhawkPath'], '');
+        assert.equal(project(copiedRoot).editor.installationPath, '');
+        await openingTest.test('a rejected automatic installation write still allows the project to load', async () => {
+          onFolders({ added: [], removed: [{ uri: Uri.file(copiedRoot) }] });
+          delete vscodeSettings['wham.windhawkPath'];
+          beforeSettingWrite = async key => {
+            if (key === 'windhawkPath') throw new Error('Cannot write invalid user settings');
+          };
+          try {
+            onFolders({ added: [{ uri: Uri.file(copiedRoot) }], removed: [] });
+            await settle(() => project(copiedRoot)?.editorNeedsApply !== undefined);
+            assert.equal(project(copiedRoot).editor.installationPath, '');
+          } finally {
+            beforeSettingWrite = undefined;
+          }
+        });
+      } finally {
+        onFolders({ added: [], removed: [{ uri: Uri.file(copiedRoot) }] });
+        await receive({ action: 'computerPreferences', settings: normalComputerSettings });
+      }
+    });
     onFolders({ added: [], removed: [{ uri: Uri.file(unconfiguredRoot) }] });
+    await t.test('an earlier runtime poll cannot overwrite a new Windhawk installation', async () => {
+      const oldInstallation = normalComputerSettings.installationPath;
+      const newInstallation = path.join(root, 'new-installation');
+      const cli = path.join(oldInstallation, 'windhawk-cli.exe');
+      await fs.mkdir(newInstallation);
+      await fs.copyFile(path.join(oldInstallation, 'windhawk.ini'), path.join(newInstallation, 'windhawk.ini'));
+      await fs.writeFile(cli, 'fixture');
+      let releasePoll;
+      const inspected = new Promise(resolve => {
+        beforeInspectInstallation = async installation => {
+          if (installation !== oldInstallation) return;
+          beforeInspectInstallation = undefined;
+          await new Promise(release => {
+            releasePoll = release;
+            resolve();
+          });
+        };
+      });
+      try {
+        onWindowStateChange({ focused: true });
+        await inspected;
+        const saving = receive({
+          action: 'computerPreferences',
+          settings: { ...normalComputerSettings, installationPath: newInstallation }
+        });
+        // Let an unqueued save finish before the older poll gets its result back.
+        await Promise.race([saving, new Promise(resolve => setTimeout(resolve, 1500))]);
+        releasePoll();
+        await saving;
+        await receive({ action: 'generate', root, entry: path.join(root, 'src/one.cpp') });
+        assert.equal(project().windhawk.root, newInstallation);
+        assert.equal(project().editor.installationPath, newInstallation);
+      } finally {
+        releasePoll?.();
+        beforeInspectInstallation = undefined;
+        await fs.unlink(cli);
+        await receive({ action: 'computerPreferences', settings: normalComputerSettings });
+      }
+    });
     const filesAfterPreferences = await Promise.all(projectFiles.map(file => fs.readFile(path.join(root, file))));
     assert.deepEqual(filesAfterPreferences, filesBeforePreferences);
     const settingsFile = path.join(root, '.vscode/settings.json');
@@ -577,7 +723,49 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     watchers[0].delete(Uri.file(one));
     await settle(() => project()?.entries.length === 1);
     assert.ok((await fs.readFile(oneOutput, 'utf8')).includes('shared = 99'));
+    await t.test('a rejected timing migration leaves the legacy config on disk', async () => {
+      const configFile = path.join(root, 'windhawk-amalgamation.json');
+      const legacyConfig = await fs.readFile(configFile, 'utf8');
+      beforeSettingWrite = async key => {
+        if (key === 'debounceMs') throw new Error('User settings has unsaved changes');
+      };
+      try {
+        await receive({ action: 'config', root, config: { ...project().config, inlineAngleIncludes: true } });
+        assert.equal(messages.at(-1).type, 'error');
+        assert.equal(await fs.readFile(configFile, 'utf8'), legacyConfig);
+      } finally {
+        beforeSettingWrite = undefined;
+        if ((await fs.readFile(configFile, 'utf8')) !== legacyConfig) {
+          await fs.writeFile(configFile, legacyConfig);
+          watchers[0].change(Uri.file(configFile));
+          await settle(() => project().config.inlineAngleIncludes === false);
+        }
+      }
+    });
     // A new output directory is ignored like the one setup created; existing rules stay.
+    await t.test('a rejected ignore rule leaves the existing layout on disk', async () => {
+      const ignoreFile = path.join(root, '.gitignore');
+      const previousIgnore = await fs.readFile(ignoreFile).catch(error => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+      if (previousIgnore) await fs.unlink(ignoreFile);
+      await fs.mkdir(ignoreFile);
+      const configFile = path.join(root, 'windhawk-amalgamation.json');
+      const layoutBeforeFailedMove = await fs.readFile(configFile, 'utf8');
+      await receive({ action: 'config', root, config: { ...defaults, debounceMs: 10, outputDirectory: 'build' } });
+      await fs.rmdir(ignoreFile);
+      if (previousIgnore) await fs.writeFile(ignoreFile, previousIgnore);
+      assert.equal(messages.at(-1).type, 'error');
+      assert.equal(await fs.readFile(configFile, 'utf8'), layoutBeforeFailedMove);
+    });
+    await t.test('moving output adds a literal ignore rule for brackets in the directory name', async () => {
+      await receive({
+        action: 'config',
+        root,
+        config: { ...defaults, debounceMs: 10, outputDirectory: 'build[local]' }
+      });
+      assert.match(await fs.readFile(path.join(root, '.gitignore'), 'utf8'), /\/build\\\[local\\\]\//);
+    });
     await receive({ action: 'config', root, config: { ...defaults, debounceMs: 10, outputDirectory: 'build' } });
     await receive({ action: 'config', root, config: { ...defaults, debounceMs: 10 } });
     const ignoreLines = (await fs.readFile(path.join(root, '.gitignore'), 'utf8')).split(/\r?\n/);
@@ -589,6 +777,46 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     assert.equal(vscodeSettings['wham.debounceMs'], 10);
     assert.equal(settingTargets['wham.debounceMs'], mock.ConfigurationTarget.Global);
     assert.equal(project().config.debounceMs, 10);
+    await t.test(
+      'timing settings preserve the debounce and refresh Draft after switching to Manual',
+      async timingTest => {
+        const configuration = mock.workspace.getConfiguration('wham');
+        const originalSource = await fs.readFile(two, 'utf8');
+        const before = await fs.readFile(twoOutput);
+        await configuration.update('debounceMs', 10000, mock.ConfigurationTarget.Workspace);
+        await fs.writeFile(two, originalSource.replace('Second Mod', 'Debounce Changed'));
+        onSave({ uri: Uri.file(two) });
+        await configuration.update('debounceMs', 9000, mock.ConfigurationTarget.Workspace);
+        try {
+          await timingTest.test('changing just the debounce does not generate a waiting save immediately', async () => {
+            await new Promise(resolve => setTimeout(resolve, 450));
+            assert.deepEqual(await fs.readFile(twoOutput), before);
+          });
+          const beforeManual = await fs.readFile(twoOutput);
+          await fs.writeFile(two, originalSource.replace('Second Mod', 'Saved During Debounce'));
+          onSave({ uri: Uri.file(two) });
+          await commands.get('windhawk.toggleOnSave')();
+          await settle(() => project().entries[0].metadata.fields.name[0] === 'Saved During Debounce');
+          assert.deepEqual(await fs.readFile(twoOutput), beforeManual);
+        } finally {
+          delete workspaceSettings['wham.debounceMs'];
+          await fs.writeFile(two, originalSource);
+          onSave({ uri: Uri.file(two) });
+          await receive({ action: 'generate', root, entry: two });
+          await commands.get('windhawk.toggleOnSave')();
+        }
+      }
+    );
+    await t.test('a single-folder workspace can save its window-scoped debounce override', async () => {
+      await mock.workspace.getConfiguration('wham').update('debounceMs', 30, mock.ConfigurationTarget.Workspace);
+      try {
+        await receive({ action: 'config', root, config: { ...project().config, debounceMs: 40 } });
+        assert.equal(workspaceSettings['wham.debounceMs'], 40);
+        assert.equal(settingTargets['wham.debounceMs'], mock.ConfigurationTarget.Workspace);
+      } finally {
+        delete workspaceSettings['wham.debounceMs'];
+      }
+    });
     // The command flips this project's setting.
     await commands.get('windhawk.toggleOnSave')();
     assert.equal(vscodeSettings['wham.generate'], 'manual');

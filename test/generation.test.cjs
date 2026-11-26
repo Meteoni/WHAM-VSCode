@@ -207,6 +207,29 @@ test('outputs changed on disk are flagged, and new entries are discovered', asyn
   }
 });
 
+test('switching to Manual while an automatic output is staged leaves the output unchanged', async () => {
+  const p = await project(sources);
+  const writeFile = fs.writeFile;
+  try {
+    await p.pipeline.enqueue(p.state);
+    const output = p.at('output/a.wh.cpp');
+    const before = await p.read('output/a.wh.cpp');
+    await p.write('src/shared.h', '#pragma once\nint shared = 2;\n');
+    fs.writeFile = async (file, ...args) => {
+      await writeFile(file, ...args);
+      if (file.startsWith(output + '.') && file.endsWith('.tmp')) p.state.project.config.generate = 'manual';
+    };
+    await p.pipeline.enqueue(p.state, [p.at('src/a.cpp')], { automatic: true });
+    assert.equal(p.state.project.config.generate, 'manual');
+    assert.equal(await p.read('output/a.wh.cpp'), before);
+    assert.equal(p.entry('src/a.cpp').status, 'stale');
+    assert.deepEqual(await fs.readdir(p.at('output')), ['a.wh.cpp', 'b.wh.cpp']);
+  } finally {
+    fs.writeFile = writeFile;
+    await p.cleanup();
+  }
+});
+
 test('a source edited during generation queues another pass instead of writing', async () => {
   const p = await project(sources);
   try {

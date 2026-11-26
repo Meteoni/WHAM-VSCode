@@ -104,6 +104,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     isSet: setting => vscode.workspace.getConfiguration('wham').inspect(setting)?.globalValue !== undefined,
     set: (setting, value) =>
       vscode.workspace.getConfiguration('wham').update(setting, value, vscode.ConfigurationTarget.Global)
+  }).catch(error => {
+    // User settings may be temporarily unwritable. Retry on the next activation.
+    log.appendLine('Could not migrate WHAM computer settings: ' + String(error));
   });
   /** Computer-wide preferences, from VS Code settings. */
   const computer = () => readComputerPreferences(setting => vscode.workspace.getConfiguration('wham').get(setting));
@@ -121,6 +124,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             .update(computerSettings[key], next[key], vscode.ConfigurationTarget.Global);
     } finally {
       savingComputer--;
+      // Successful writes and Settings editor events still count when a later write fails.
+      if (!savingComputer) await applyComputerPreferences();
     }
   };
   const installationPreferences = (): InstallationPreferences => {
@@ -139,7 +144,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const explicitTiming = <K extends keyof GenerationTiming>(root: string, key: K) => {
     const inspected = vscode.workspace.getConfiguration('wham', vscode.Uri.file(root)).inspect<unknown>(key);
     const levels = [
-      [inspected?.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder],
+      // A single-folder window can expose its workspace settings at both levels.
+      [key === 'generate' ? inspected?.workspaceFolderValue : undefined, vscode.ConfigurationTarget.WorkspaceFolder],
       [inspected?.workspaceValue, vscode.ConfigurationTarget.Workspace],
       [inspected?.globalValue, vscode.ConfigurationTarget.Global]
     ] as const;
@@ -155,20 +161,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     generate: explicitTiming(state.project.root, 'generate')?.value ?? state.project.config.generate,
     debounceMs: explicitTiming(state.project.root, 'debounceMs')?.value ?? state.project.config.debounceMs
   });
+  const lastGenerateSetting = new WeakMap<ProjectState, GenerationTiming['generate']>();
   /**
    * Store changed timing in VS Code settings. After save / Manual belongs to this project: its
    * folder settings when it is a workspace folder. Otherwise, and for the debounce, the level
    * that already holds a value, or user settings.
    */
-  const saveTiming = async (state: ProjectState, next: GenerationTiming) => {
-    const current = timing(state);
+  const saveTiming = async (state: ProjectState, next: GenerationTiming, fallback = state.project.config) => {
     const folder = vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, state.project.root));
     for (const key of ['generate', 'debounceMs'] as const) {
-      if (next[key] === current[key]) continue;
+      const explicit = explicitTiming(state.project.root, key);
+      if (next[key] === (explicit?.value ?? fallback[key])) continue;
       const target =
         key === 'generate' && folder
           ? vscode.ConfigurationTarget.WorkspaceFolder
-          : (explicitTiming(state.project.root, key)?.target ?? vscode.ConfigurationTarget.Global);
+          : (explicit?.target ?? vscode.ConfigurationTarget.Global);
       await vscode.workspace
         .getConfiguration('wham', vscode.Uri.file(state.project.root))
         .update(key, next[key], target);
@@ -377,9 +384,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       )
         await closeElevationSessions();
       for (const project of projects.values()) {
-        project.editor = resolveEditor(await readEditorSettings(project.project.root));
-        await refreshRuntime(project);
-        await refreshDraft(project);
+        // An earlier runtime poll must finish before replacing its installation state.
+        const update = project.queue.then(async () => {
+          if (disposed || project.removed) return;
+          project.editor = resolveEditor(await readEditorSettings(project.project.root));
+          await refreshRuntime(project);
+          await refreshDraft(project);
+        });
+        project.queue = update.catch(() => {});
+        await update;
       }
       publish();
     });
@@ -588,7 +601,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return projects.get(loadedRoot)!;
     }
     const applied = await readEditorSettings(root);
-    if (!computer().installationPath && applied.installationPath) {
+    if (applied.installationPath && !computer().installationPath) {
       let usable = false;
       try {
         await fs.access(path.join(applied.installationPath, 'windhawk.ini'));
@@ -596,10 +609,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } catch {
         /* A copied project's path may not exist on this computer. */
       }
-      if (usable) {
-        await saveComputer({ installationPath: applied.installationPath });
-        await applyComputerPreferences();
-      }
+      if (
+        usable &&
+        vscode.workspace.getConfiguration('wham').inspect(computerSettings.installationPath)?.globalValue === undefined
+      )
+        await saveComputer({ installationPath: applied.installationPath }).catch(error => {
+          log.appendLine('Could not adopt the project’s Windhawk installation: ' + String(error));
+        });
     }
     const state: ProjectState = {
       project: { root, config: { ...defaults } },
@@ -611,6 +627,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       editor: resolveEditor(applied)
     };
     projects.set(root, state);
+    const mode = explicitTiming(root, 'generate')?.value;
+    if (mode) lastGenerateSetting.set(state, mode);
     const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '**/*'));
     state.subscriptions = [
       watcher,
@@ -1145,7 +1163,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         (await inspectWindhawk(settings.installationPath)).compileFlags
       );
       await saveComputer({ installationPath: settings.installationPath });
-      await applyComputerPreferences();
     }
     await applyEditor(state, settings);
   };
@@ -1170,8 +1187,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const config = validateConfig(input);
     const layoutChanged = JSON.stringify(layoutConfig(config)) !== JSON.stringify(layoutConfig(state.project.config));
     if (layoutChanged) await updateLayout(state, config);
-    // The rewritten file no longer holds timing; keep the timing the form showed.
-    await saveTiming(state, { generate: config.generate, debounceMs: config.debounceMs });
+    else await saveTiming(state, config);
     if (layoutChanged && timing(state).generate === 'onSave') await enqueue(state, undefined, { automatic: true });
   };
   const updateLayout = async (state: ProjectState, config: Configuration) => {
@@ -1185,14 +1201,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await assertSafeDestination(state.project.root, config.outputDirectory + '/.wham-probe');
       await discoverEntries(temporaryProject, nodeFiles);
       if (disposed || state.removed) throw new Error('This project was closed.');
+      // A failed ignore update must leave the old layout in place. Brackets are literal in paths.
+      if (config.outputDirectory !== state.project.config.outputDirectory)
+        await appendIgnoreRules(temporaryProject, [`/${config.outputDirectory.replace(/[[\]]/g, '\\$&')}/`]);
+      // Keep legacy timing until VS Code has accepted the settings needed by the rewritten file.
+      await saveTiming(state, config, defaults);
       await writeOutput(
         state.project,
         path.join(state.project.root, 'windhawk-amalgamation.json'),
         Buffer.from(JSON.stringify(layoutConfig(config), null, 2) + '\n')
       );
-      // Generated output stays out of Git wherever it moves, as setup arranged for the first one.
-      if (config.outputDirectory !== state.project.config.outputDirectory)
-        await appendIgnoreRules(temporaryProject, [`/${config.outputDirectory}/`]);
       state.project = temporaryProject;
       // Directory changes need fresh entry ownership and dependency state.
       if (state.timer) clearTimeout(state.timer);
@@ -1372,7 +1390,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       throw new Error('Wait for the current Windhawk operation before changing preferences.');
     if (root) await fs.access(path.join(root, 'windhawk.ini'));
     await saveComputer({ installationPath: root, ...preferences, integration: settings.integration });
-    await applyComputerPreferences();
     await postToSidebar({ type: 'computerSaved' });
   };
   const browseComputerInstallation = async () => {
@@ -1577,15 +1594,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         Object.values(computerSettings).some(setting => event.affectsConfiguration('wham.' + setting))
       )
         applyComputerPreferences().catch(error => log.appendLine(String(error)));
-      // Timing changed from the sidebar, the toggle command, or the Settings editor.
-      if (!event.affectsConfiguration('wham.generate') && !event.affectsConfiguration('wham.debounceMs')) return;
-      for (const state of projects.values())
-        if (timing(state).generate === 'manual') {
-          // A save made just before switching to Manual doesn't generate after it; it stays stale.
-          if (state.timer) clearTimeout(state.timer);
-          state.pending.clear();
-        } else generateStale(state);
-      publish();
+      // Only a change in this project's mode should bypass its normal save debounce.
+      if (event.affectsConfiguration('wham.generate')) {
+        for (const state of projects.values()) {
+          const previous = lastGenerateSetting.get(state) ?? state.project.config.generate;
+          const explicit = explicitTiming(state.project.root, 'generate')?.value;
+          if (explicit) lastGenerateSetting.set(state, explicit);
+          else lastGenerateSetting.delete(state);
+          const mode = explicit ?? state.project.config.generate;
+          if (mode === previous) continue;
+          if (mode === 'onSave') generateStale(state);
+          else {
+            if (state.timer) clearTimeout(state.timer);
+            // Saves still update Draft and metadata in Manual mode.
+            const pending = [...state.entries.values()].filter(entry => state.pending.has(entry.path));
+            state.pending.clear();
+            if (pending.length) scheduleRefresh(state, false, pending);
+          }
+        }
+        publish();
+      } else if (event.affectsConfiguration('wham.debounceMs')) publish();
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(event => {
       for (const folder of event.added)

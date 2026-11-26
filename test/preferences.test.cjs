@@ -122,3 +122,28 @@ test('hand-edited computer settings of the wrong kind read as defaults', () => {
     }
   );
 });
+
+test('computer migration skips invalid stored values and normalizes valid ones', async () => {
+  const data = {};
+  const preferences = {
+    computer: {
+      installationPath: '  C:/Windhawk  ',
+      integration: 'default',
+      installations: { 'c:\\windhawk': { elevation: 'runas', gsudoPath: '  C:/tools/gsudo.exe  ' } }
+    }
+  };
+  await migrateComputerPreferences(
+    { get: key => data[key], update: async (key, value) => (data[key] = value) },
+    { ...preferences, computer: { ...preferences.computer, installationPath: 42 } },
+    { isSet: () => false, set: async () => assert.fail('Invalid preferences should not be written') }
+  );
+  delete data.computerPreferencesMigrated;
+  const settings = {};
+  await migrateComputerPreferences(
+    { get: key => data[key], update: async (key, value) => (data[key] = value) },
+    preferences,
+    { isSet: () => false, set: async (key, value) => (settings[key] = value) }
+  );
+  assert.deepEqual(settings, { windhawkPath: 'C:/Windhawk', gsudoPath: 'C:/tools/gsudo.exe' });
+  assert.equal(data.computerPreferencesMigrated, true);
+});

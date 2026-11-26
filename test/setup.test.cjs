@@ -325,6 +325,11 @@ test('editor service transitions activate only the selected services and preserv
       assert.ok(settings['clangd.arguments'].includes('--log=verbose'));
       assert.equal((await readEditorSettings(root)).integration, integration);
     }
+    await fs.writeFile(
+      path.join(root, '.vscode/settings.json'),
+      JSON.stringify({ 'C_Cpp.intelliSenseEngine': 'disabled', 'clangd.enable': false })
+    );
+    assert.equal((await readEditorSettings(root)).integration, undefined, 'Neither configured service is enabled');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

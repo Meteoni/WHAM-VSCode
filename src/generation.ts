@@ -239,7 +239,9 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       return;
     }
     if (!canGenerate()) return;
-    if (!existing?.equals(result.bytes)) await writeOutput(state.project, output, result.bytes);
+    // Manual mode may be selected while the replacement is staged or waiting on a file lock.
+    if (!existing?.equals(result.bytes) && !(await writeOutput(state.project, output, result.bytes, canGenerate)))
+      return;
     entry.ownedHash = checksum(result.bytes);
     storedHashes[output] = entry.ownedHash;
     entry.status = 'current';

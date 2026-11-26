@@ -127,7 +127,12 @@ export async function assertSafeDestination(root: string, relative: string): Pro
   return target;
 }
 
-export async function writeOutput(project: Project, output: string, bytes: Buffer): Promise<void> {
+export async function writeOutput(
+  project: Project,
+  output: string,
+  bytes: Buffer,
+  canCommit?: () => boolean
+): Promise<boolean> {
   await assertSafeDestination(project.root, portableRelative(project.root, output));
   await fs.mkdir(path.dirname(output), { recursive: true });
   const temporary = output + '.' + randomUUID() + '.tmp';
@@ -135,9 +140,10 @@ export async function writeOutput(project: Project, output: string, bytes: Buffe
   try {
     await fs.writeFile(temporary, bytes, { flag: 'wx' });
     for (let attempt = 0; ; attempt++) {
+      if (canCommit && !canCommit()) return false;
       try {
         await fs.rename(temporary, output);
-        break;
+        return true;
       } catch (error) {
         // Windows readers and indexers can briefly prevent an atomic replacement.
         if (

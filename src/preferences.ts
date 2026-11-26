@@ -101,14 +101,16 @@ export async function migrateComputerPreferences(
   settings: { isSet(setting: string): boolean; set(setting: string, value: string): PromiseLike<unknown> }
 ): Promise<void> {
   if (global.get<boolean>('computerPreferencesMigrated')) return;
-  const { installationPath, integration, installations } = preferences.computer;
-  const installation = installationPath ? installations[pathKey(installationPath)] : undefined;
-  const saved: ComputerPreferences = {
-    installationPath,
-    integration,
-    elevation: installation?.elevation ?? computerDefaults.elevation,
-    gsudoPath: installation?.gsudoPath ?? ''
+  const computer = preferences.computer;
+  const installationPath = typeof computer?.installationPath === 'string' ? computer.installationPath.trim() : '';
+  const installation = installationPath ? computer.installations?.[pathKey(installationPath)] : undefined;
+  const stored = {
+    windhawkPath: installationPath,
+    languageService: computer?.integration,
+    elevation: installation?.elevation,
+    gsudoPath: installation?.gsudoPath
   };
+  const saved = readComputerPreferences(setting => stored[setting as keyof typeof stored]);
   for (const key of Object.keys(computerSettings) as (keyof ComputerPreferences)[])
     if (saved[key] && saved[key] !== computerDefaults[key] && !settings.isSet(computerSettings[key]))
       await settings.set(computerSettings[key], saved[key]);
