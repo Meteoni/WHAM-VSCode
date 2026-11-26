@@ -401,7 +401,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const generateStale = (state: ProjectState) => {
     if (timing(state).generate !== 'onSave') return;
     const stale = [...state.entries.values()].filter(entry => entry.status === 'stale').map(entry => entry.path);
-    if (stale.length) void enqueue(state, stale);
+    if (stale.length) void enqueue(state, stale, { automatic: true });
   };
   const saveRelevant = async (state: ProjectState): Promise<boolean> => {
     const files = relevantDirty(state);
@@ -1194,7 +1194,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (layoutChanged) await updateLayout(state, config);
     // The rewritten file no longer holds timing; keep the timing the form showed.
     await saveTiming(state, { generate: config.generate, debounceMs: config.debounceMs });
-    if (layoutChanged && timing(state).generate === 'onSave') await enqueue(state);
+    if (layoutChanged && timing(state).generate === 'onSave') await enqueue(state, undefined, { automatic: true });
   };
   const updateLayout = async (state: ProjectState, config: Configuration) => {
     if (isDirty(path.join(state.project.root, 'windhawk-amalgamation.json')))

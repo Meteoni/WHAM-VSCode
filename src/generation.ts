@@ -180,8 +180,10 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
   };
 
   /** Generate one entry from saved files and write it unless that would lose output edits. */
-  const generate = async (state: ProjectState, entry: EntryState, force: boolean) => {
-    if (stopped(state)) return;
+  const generate = async (state: ProjectState, entry: EntryState, force: boolean, automatic = false) => {
+    // The mode can change while work is queued or while it reads the saved files.
+    const canGenerate = () => !stopped(state) && (!automatic || host.timing(state).generate === 'onSave');
+    if (!canGenerate()) return;
     const output = outputPath(state.project, entry.path);
     if (host.isDirty(output)) {
       entry.status = 'blocked';
@@ -224,6 +226,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       return;
     }
     if (!(await inputsUnchanged(result.dependencies)) || relevantDirty(state, entry).length) {
+      if (!canGenerate()) return;
       entry.status = 'pending';
       entry.message = 'Source changed during generation; queued another pass.';
       schedule(state, [entry.path]);
@@ -235,7 +238,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       entry.message = 'Output changed during generation; no write performed.';
       return;
     }
-    if (stopped(state)) return;
+    if (!canGenerate()) return;
     if (!existing?.equals(result.bytes)) await writeOutput(state.project, output, result.bytes);
     entry.ownedHash = checksum(result.bytes);
     storedHashes[output] = entry.ownedHash;
@@ -250,7 +253,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
   const enqueue = (
     state: ProjectState,
     targets?: string[],
-    options: { force?: boolean; refreshProject?: boolean } = {}
+    options: { force?: boolean; refreshProject?: boolean; automatic?: boolean } = {}
   ): Promise<void> => {
     state.queue = state.queue.then(async () => {
       if (stopped(state)) return;
@@ -260,7 +263,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
         for (const entry of entries) state.draftPending.delete(entry.path);
         for (const entry of entries) {
           try {
-            await generate(state, entry, options.force ?? false);
+            await generate(state, entry, options.force ?? false, options.automatic);
           } catch (error) {
             entry.status = 'stale';
             entry.message = String(error);
@@ -289,11 +292,12 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       state.draftPending.delete(target);
     }
     if (state.timer) clearTimeout(state.timer);
+    const { generate: mode, debounceMs } = host.timing(state);
     state.timer = setTimeout(() => {
       const targets = [...state.pending];
       state.pending.clear();
-      void enqueue(state, targets, { refreshProject: false });
-    }, host.timing(state).debounceMs);
+      void enqueue(state, targets, { refreshProject: false, automatic: mode === 'onSave' });
+    }, debounceMs);
   };
 
   /**

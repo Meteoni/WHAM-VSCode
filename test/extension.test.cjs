@@ -494,8 +494,6 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     assert.equal(vscodeSettings['wham.debounceMs'], undefined, 'An unchanged debounce is not written');
     assert.deepEqual(await fs.readFile(path.join(root, 'windhawk-amalgamation.json')), configBefore);
     assert.equal(project().config.generate, 'manual');
-    // A timing change doesn't wait for the project's queue; let earlier work finish first.
-    await new Promise(resolve => setTimeout(resolve, 450));
     const manualOutput = await fs.readFile(twoOutput);
     await fs.writeFile(shared, '#pragma once\nint shared = 5;\n');
     onSave({ uri: Uri.file(shared) });
