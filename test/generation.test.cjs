@@ -268,6 +268,35 @@ test('outputs of removed entries: owned ones are deleted, edited ones kept with 
   }
 });
 
+test('orphan ownership without stored hashes protects edited, dirty and foreign outputs', async () => {
+  const p = await project({ ...sources, 'src/c.cpp': 'int c;\n', 'src/d.cpp': 'int d;\n' });
+  try {
+    await p.pipeline.enqueue(p.state);
+    const otherRoot = await p.read('output/b.wh.cpp');
+    const edited = otherRoot.replace('int b;', 'int b; // edited');
+    const dirty = await p.read('output/d.wh.cpp');
+    await p.write('output/b.wh.cpp', edited);
+    await p.write('output/c.wh.cpp', otherRoot);
+    p.dirty.set(p.at('output/d.wh.cpp'), dirty.replace('int d;', 'int d; // unsaved edit'));
+    for (const entry of p.state.entries.values()) {
+      delete p.hashes[entry.output];
+      delete entry.ownedHash;
+      await fs.rm(entry.path);
+    }
+    await p.pipeline.refresh(p.state);
+    assert.equal(await p.read('output/a.wh.cpp'), undefined, 'An intact footer establishes ownership');
+    assert.equal(await p.read('output/b.wh.cpp'), edited);
+    assert.equal(await p.read('output/c.wh.cpp'), otherRoot);
+    assert.equal(await p.read('output/d.wh.cpp'), dirty);
+    assert.deepEqual(
+      p.state.retained,
+      ['b', 'c', 'd'].map(name => `Preserved orphan output: ${p.at(`output/${name}.wh.cpp`)}`)
+    );
+  } finally {
+    await p.cleanup();
+  }
+});
+
 test('debounced work does nothing once the project is removed', async () => {
   const p = await project(sources);
   try {

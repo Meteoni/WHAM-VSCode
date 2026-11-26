@@ -10,7 +10,7 @@ Write a Windhawk mod across several C++ files, then generate a single `.wh.cpp` 
 
 1. Install the WHAM `.vsix` through **Extensions: Install from VSIX…** in VS Code.
 2. Open **WHAM** in the activity bar. Choose **New project**, **Existing project**, or **Recover mods**.
-3. Apply the suggested editor setup, customize it, or skip it. **Extension settings** holds installation and elevation preferences. **Project settings → Editor** shows the C++ language service and indentation from the project's editor files. Use **Apply** there to write your choices to those files.
+3. Apply the suggested editor setup, customize it, or skip it. **Extension settings** holds installation and elevation preferences. **Project settings → Editor** shows the C++ language service and indentation from the project's editor files. Use **Apply** there to write your choices. The shared `.vscode/extensions.json` recommends both Microsoft C/C++ and clangd.
 
 **Open project** remembers recent folders and opens existing WHAM projects without setup prompts. Browse to select another source folder.
 
@@ -22,7 +22,7 @@ src/mod.cpp + included headers → output/mod.wh.cpp
 
 Output updates when you save. Use **Generate** for a single mod or **Generate all** for the project. **Settings** controls generation, compiler integration, indentation, and Git ignore rules.
 
-New projects get `src/`, `output/`, configuration, and Git setup. Generated output and local compiler settings are ignored. **Create initial Git commit** is optional for new or recovered repositories; it uses your existing Git identity.
+New projects get `src/`, `output/`, configuration, and Git setup. Git ignore rules cover generated output and local editor settings. If Git already tracks any machine-specific editor files, Apply offers to stop tracking them and keep them on disk. **Create initial Git commit** is optional for new or recovered repositories and uses your existing Git identity.
 
 ## Recovery
 

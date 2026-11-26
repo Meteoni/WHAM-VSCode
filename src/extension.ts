@@ -54,9 +54,12 @@ import {
   EditorSettings,
   findWindhawk,
   gitStatus,
+  localEditorFiles,
   mergeRecoveries,
   readEditorSettings,
-  setupProject
+  setupProject,
+  stopTrackingEditorFiles,
+  trackedEditorFiles
 } from './setup';
 
 /** Fill {{name}} placeholders in a webview template; inserted values are not rescanned. */
@@ -1003,6 +1006,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     else void vscode.window.showInformationMessage(`Project ready: ${root}`);
     return true;
   };
+  const refreshGit = async (state: ProjectState) => {
+    state.git = await gitStatus(state.project.root, gitExecutable());
+    publish();
+  };
   const applyEditor = async (state: ProjectState, settings: EditorSettings, reviewOnly = false) => {
     if (disposed || state.removed) throw new Error('This project was closed.');
     const windhawk = await inspectWindhawk(settings.installationPath);
@@ -1045,13 +1052,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     // Editor preferences and toolchain paths are local; formatting and recommendations are shared.
     if (disposed || state.removed) throw new Error('This project was closed.');
-    await appendIgnoreRules(state.project, ['/.vscode/settings.json', '/.vscode/c_cpp_properties.json', '/.clangd']);
+    await appendIgnoreRules(
+      state.project,
+      localEditorFiles.map(file => '/' + file)
+    );
     state.editor = resolveEditor(await readEditorSettings(state.project.root));
     if (windhawk.root === state.editor.installationPath)
       state.windhawk = { ...windhawk, installationPreferences: state.editor.installationPreferences };
     await refreshRuntime(state);
-    state.git = await gitStatus(state.project.root, gitExecutable());
-    publish();
+    await refreshGit(state);
     if (settings.integration !== 'clangd' && vscode.extensions.getExtension('ms-vscode.cpptools')) {
       try {
         await vscode.commands.executeCommand('C_Cpp.ConfigurationSelect', 'Windhawk (WHAM)');
@@ -1059,6 +1068,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         /* User can select it via the C++ status bar. */
       }
     }
+    const root = state.project.root,
+      git = gitExecutable();
+    void trackedEditorFiles(root, git)
+      .then(async files => {
+        if (!files.length || disposed || state.removed) return;
+        const choice = await vscode.window.showWarningMessage(
+          `Git tracks ${files.join(', ')}. These editor files contain this computer's Windhawk paths. Stop tracking keeps them on disk and stages their removal from Git.`,
+          'Stop tracking'
+        );
+        if (choice === 'Stop tracking' && !disposed && !state.removed) {
+          await stopTrackingEditorFiles(root, files, git);
+          await refreshGit(state);
+        }
+      })
+      .catch(error => log.appendLine('Could not check or stop tracking local editor files: ' + String(error)));
     return true;
   };
   const configureEditor = async (state: ProjectState) => {
@@ -1077,7 +1101,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         'Set up the editor?',
         {
           modal: true,
-          detail: `Windhawk: ${settings.installationPath || 'Not selected (choose a folder on Apply)'}\nLanguage service: ${languageService}\nIndentation: ${indentation}`
+          detail: `Windhawk: ${settings.installationPath || 'Not selected (choose a folder on Apply)'}\nLanguage service: ${languageService}\nIndentation: ${indentation}\nShared extension recommendations: Microsoft C/C++ and clangd`
         },
         { title: 'Apply' },
         { title: 'Customize…' },
@@ -1421,10 +1445,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await postToSidebar({ type: 'editorSaved', root: state.project.root });
     else if (message.action === 'reviewEditor')
       await postToSidebar({ type: 'editorReviewed', root: state.project.root });
-  };
-  const refreshGit = async (state: ProjectState) => {
-    state.git = await gitStatus(state.project.root, gitExecutable());
-    publish();
   };
   const routeSidebarMessage = createSidebarRouter<ProjectState, EntryState>({
     findProject: root => (typeof root === 'string' ? projects.get(root) : undefined),

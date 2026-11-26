@@ -255,6 +255,7 @@ test('initial commit contains only setup and recovered sources, and protects exi
     assert.deepEqual(gitRun('ls-tree', '-r', '--name-only', 'HEAD').trim().split(/\r?\n/), [
       '.clang-format',
       '.gitignore',
+      '.vscode/extensions.json',
       'src/recovered.cpp',
       'src/shared [1].h',
       'windhawk-amalgamation.json'
@@ -287,6 +288,46 @@ test('initial commit reports missing identity without changing Git identity or r
       assert.equal(execFileSync(git, ['-C', root, 'config', '--get', key], { encoding: 'utf8' }).trim(), '');
     assert.ok((await fs.stat(path.join(root, 'windhawk-amalgamation.json'))).isFile());
     assert.ok((await gitStatus(root, git)).changes > 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('editor setup always recommends both services and preserves recommendations and JSONC comments', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wham-editor-recommendations-'));
+  const installation = path.join(root, 'windhawk');
+  try {
+    for (const file of ['Compiler/bin/clang++.exe', 'Compiler/bin/clangd.exe', 'Compiler/include/windhawk_api.h']) {
+      const target = path.join(installation, file);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, 'fixture');
+    }
+    await fs.mkdir(path.join(root, '.vscode'));
+    const project = { root, config: { ...defaults } };
+    const file = '.vscode/extensions.json';
+    const cpp = 'ms-vscode.cpptools',
+      clangd = 'llvm-vs-code-extensions.vscode-clangd';
+    for (const integration of ['cpp', 'clangd', 'both', undefined]) {
+      const first = integration === 'clangd' ? clangd : cpp;
+      await fs.writeFile(
+        path.join(root, file),
+        `// Project extensions\n{\n  "recommendations": [\n    "example.custom", // Keep custom\n    "${first}", // Keep this comment too\n  ],\n  "unwantedRecommendations": ["example.unwanted"]\n}\n`
+      );
+      const settings = integration
+        ? { ...editorDefaults, integration, installationPath: installation }
+        : editorDefaults;
+      const updated = (await editorConfiguration(project, settings)).get(file).toString();
+      const errors = [];
+      assert.deepEqual(parse(updated, errors, { allowTrailingComma: true }), {
+        recommendations: ['example.custom', first, first === cpp ? clangd : cpp],
+        unwantedRecommendations: ['example.unwanted']
+      });
+      assert.deepEqual(errors, []);
+      for (const comment of ['// Project extensions', '// Keep custom', '// Keep this comment too'])
+        assert.ok(updated.includes(comment), comment);
+      await fs.writeFile(path.join(root, file), updated);
+      assert.equal((await editorConfiguration(project, settings)).get(file).toString(), updated);
+    }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

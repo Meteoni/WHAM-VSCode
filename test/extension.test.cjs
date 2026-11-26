@@ -64,7 +64,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     // VS Code settings as user-level values, and the target of each write.
     vscodeSettings = {},
     settingTargets = {};
-  let onSettings, beforeSettingWrite, beforeInspectInstallation, runtimeCalls;
+  let onSettings, beforeSettingWrite, beforeInspectInstallation, runtimeCalls, editorGitChecks;
   const workspaceSettings = {};
   const disposable = () => ({ dispose() {} });
   const Uri = {
@@ -234,7 +234,15 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       };
     if (name === './setup' && fromAdapter(args[0])) {
       const setup = load.call(this, name, ...args);
-      return { ...setup, findWindhawk: async () => (noInstallations ? [] : setup.findWindhawk()) };
+      return {
+        ...setup,
+        findWindhawk: async () => (noInstallations ? [] : setup.findWindhawk()),
+        trackedEditorFiles: (...args) => {
+          const check = setup.trackedEditorFiles(...args);
+          editorGitChecks?.push(check);
+          return check;
+        }
+      };
     }
     if (name === './io' && fromAdapter(args[0])) {
       const io = load.call(this, name, ...args);
@@ -1073,6 +1081,89 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     assert.match(await fs.readFile(path.join(newRoot, '.clangd'), 'utf8'), /WHAM editor configuration begin/);
     assert.equal(editorProject().editor.integration, 'clangd');
     assert.equal(editorProject().editorNeedsApply, false);
+    await t.test('Apply offers to untrack local editor files only when Git tracks them', async () => {
+      const git = process.env.WHAM_TEST_GIT || 'git';
+      const gitRun = (...args) => execFileSync(git, ['-C', newRoot, ...args], { encoding: 'utf8', stdio: 'pipe' });
+      const file = '.vscode/settings.json',
+        settingsFile = path.join(newRoot, file),
+        unrelated = 'unrelated.txt';
+      const apply = { action: 'editor', root: newRoot, settings: { ...settings, integration: 'clangd' } };
+      const warnings = [];
+      let answerWarning;
+      const originalWarning = mock.window.showWarningMessage;
+      editorGitChecks = [];
+      mock.window.showWarningMessage = (message, ...buttons) => {
+        warnings.push({ message, buttons });
+        return new Promise(resolve => (answerWarning = resolve));
+      };
+      try {
+        await receive(apply);
+        assert.deepEqual(await editorGitChecks.at(-1), []);
+        assert.equal(warnings.length, 0, 'An untracked editor file does not trigger a warning');
+        gitRun('add', '-f', '--', file);
+        gitRun(
+          '-c',
+          'user.name=WHAM Test',
+          '-c',
+          'user.email=wham-test@example.invalid',
+          '-c',
+          'commit.gpgsign=false',
+          '-c',
+          `core.hooksPath=${path.join(newRoot, 'empty-hooks')}`,
+          'commit',
+          '-m',
+          'Track editor settings',
+          '--',
+          file
+        );
+        await fs.writeFile(path.join(newRoot, unrelated), 'keep staged\n');
+        gitRun('add', '--', unrelated);
+        const cachedBefore = gitRun('diff', '--cached');
+        const statusBefore = gitRun('status', '--porcelain=v1', '--untracked-files=all');
+        const settingsBefore = await fs.readFile(settingsFile);
+        await receive({ ...apply, action: 'reviewEditor', settings: { ...apply.settings, indentSize: 3 } });
+        assert.equal(editorGitChecks.length, 1, 'Review never checks for tracked files');
+        assert.equal(warnings.length, 0);
+
+        vscodeSettings['git.path'] = path.join(newRoot, 'missing-git.exe');
+        await receive(apply);
+        assert.deepEqual(await editorGitChecks.at(-1), []);
+        assert.equal(warnings.length, 0, 'An unavailable configured Git executable does not trigger a warning');
+        vscodeSettings['git.path'] = git;
+
+        const saved = messages.filter(message => message.type === 'editorSaved').length;
+        await receive(apply);
+        assert.deepEqual(await editorGitChecks.at(-1), [file]);
+        assert.equal(messages.filter(message => message.type === 'editorSaved').length, saved + 1);
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0].message, /\.vscode\/settings\.json.*this computer's Windhawk paths/);
+        assert.deepEqual(warnings[0].buttons, ['Stop tracking']);
+        answerWarning(undefined);
+        assert.equal(gitRun('status', '--porcelain=v1', '--untracked-files=all'), statusBefore);
+        assert.equal(gitRun('diff', '--cached'), cachedBefore);
+        assert.deepEqual(await fs.readFile(settingsFile), settingsBefore);
+
+        await receive(apply);
+        assert.deepEqual(await editorGitChecks.at(-1), [file]);
+        assert.equal(warnings.length, 2);
+        const changesBefore = editorProject().git.changes;
+        answerWarning('Stop tracking');
+        await settle(() => editorProject().git.changes === changesBefore + 1);
+        assert.equal(gitRun('ls-files', '--', file), '');
+        assert.equal(gitRun('status', '--porcelain=v1', '--untracked-files=all'), `D  ${file}\n${statusBefore}`);
+        assert.equal(gitRun('diff', '--cached', '--', unrelated), cachedBefore);
+        assert.deepEqual(await fs.readFile(settingsFile), settingsBefore);
+
+        await receive({ ...apply, root });
+        assert.deepEqual(await editorGitChecks.at(-1), []);
+        assert.equal(warnings.length, 2, 'A project outside Git does not trigger a warning');
+      } finally {
+        answerWarning?.(undefined);
+        editorGitChecks = undefined;
+        mock.window.showWarningMessage = originalWarning;
+        delete vscodeSettings['git.path'];
+      }
+    });
     // Two conflicting recovery copies compare directly without left/right pickers.
     let conflictPicks = 0,
       copyDiffs = 0;
