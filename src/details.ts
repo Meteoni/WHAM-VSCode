@@ -126,7 +126,8 @@ export function createDetailsView(
         case 'getInitialAppSettings':
           await reply(message, {
             contractVersion: '1.26.0',
-            appUISettings: { language, devModeOptOut: true, theme: message.theme ?? 'dark', safeMode: false }
+            // The VS Code renderer follows the webview's theme classes.
+            appUISettings: { language, devModeOptOut: true, safeMode: false }
           });
           break;
         case 'getInstalledMods':

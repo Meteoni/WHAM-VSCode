@@ -1,2 +1,6 @@
 # Fixtures are byte-exact recovery inputs and expected outputs; never convert line endings.
 test/fixtures/** -text
+
+# Preserve the upstream renderer source and the exact bundle bytes hashed by the manifest.
+vendor/windhawk/src/** -text
+media/windhawk-renderer/** -text

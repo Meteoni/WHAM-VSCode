@@ -1539,7 +1539,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           };
           const script = view.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media', 'sidebar.js'));
           const iconFont = view.webview.asWebviewUri(
-            vscode.Uri.joinPath(context.extensionUri, 'media', 'windhawk-renderer', 'codicon.edde7c4363c6d735a416.ttf')
+            vscode.Uri.joinPath(context.extensionUri, 'media', 'windhawk-renderer', 'codicon.b5576db5d289588c1912.ttf')
           );
           view.webview.html = fillTemplate(sidebarTemplate, {
             cspSource: view.webview.cspSource,

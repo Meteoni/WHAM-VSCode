@@ -9,8 +9,20 @@ const send = message => host.postMessage({ ...message, details: true, epoch, ses
 window.acquireVsCodeApi = () => ({
   getState: () => ({}),
   setState() {},
-  postMessage: message =>
-    send({ ...message, action: 'windhawk', theme: document.body.classList.contains('vscode-light') ? 'light' : 'dark' })
+  postMessage: message => {
+    // Forward only the reads WHAM can serve from the draft.
+    if (
+      message.type === 'messageWithReply' &&
+      [
+        'getInitialAppSettings',
+        'getInstalledMods',
+        'getRepositoryMods',
+        'getModSourceData',
+        'getRepositoryModSourceData'
+      ].includes(message.command)
+    )
+      send({ ...message, action: 'windhawk' });
+  }
 });
 const url = new URL(location.href);
 url.hash = '#/mods-browser/' + context.modId.replace(/^local@/, '');

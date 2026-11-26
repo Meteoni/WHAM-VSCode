@@ -30,10 +30,11 @@ body { display: flex; flex-direction: column; padding: 0; color: var(--vscode-fo
 #root { flex: 1; min-height: 0; }
 #root > div { height: calc(100dvh - var(--wham-toolbar-height, 47px)); }
 #root [data-testid="mod-details"], #root div:has(> [data-testid="mod-details"]) { padding: 0; max-width: none; }
-/* This adapter targets the renderer version recorded in pin.json. */
+/* Keep the pinned Discover renderer's app chrome and its overflow menu out of the draft preview. */
 #root :is([data-testid="app-header"], [data-testid="create-new-mod"], [data-testid="mod-details-back"], [data-testid="mod-actions"], [data-testid="mod-details-reviews"], [data-testid="mod-details-not-installed"], [data-testid="mod-details-open-in-browser"], [data-testid="mod-details-share"]),
-#root [data-testid="mod-details"] .ant-card-meta-title .ant-radio-group,
-#root .ant-tabs-tab:has(:is([data-testid="mod-details-tab-code"], [data-testid="mod-details-tab-advanced"], [data-testid="mod-details-tab-changes"], [data-testid="mod-details-tab-changelog"])) { display: none !important; }
+#root [data-testid="mod-details"] .ant-card-meta-title > .ant-radio-group,
+#root [data-testid="mod-details"] > .ant-card > .ant-card-head .ant-tabs-nav-operations,
+#root [data-testid="mod-details"] > .ant-card > .ant-card-head .ant-tabs-tab:has(:is([data-testid="mod-details-tab-code"], [data-testid="mod-details-tab-advanced"], [data-testid="mod-details-tab-changes"], [data-testid="mod-details-tab-changelog"])) { display: none !important; }
 @media (max-width: 320px) {
   .wham-toolbar { padding: 8px; }
   .wham-toolbar, .wham-toolbar .action-group, #mod-tools, .right-actions { gap: 4px; }
