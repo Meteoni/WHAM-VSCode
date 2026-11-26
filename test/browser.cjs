@@ -121,7 +121,6 @@ const { parse } = require('jsonc-parser');
           opened: true,
           config,
           editorNeedsApply: false,
-          local: { integration: 'cpp' },
           editor: { installationPath: 'C:/Windhawk', integration: 'cpp', indentStyle: 'spaces', indentSize: 4 },
           git: { branch: 'main', changes: 2 },
           retained: [],
@@ -741,7 +740,6 @@ const { parse } = require('jsonc-parser');
       projects: [
         {
           ...state.projects[0],
-          local: { integration: 'clangd' },
           editor: { ...state.projects[0].editor, integration: 'clangd', indentStyle: 'tabs', indentSize: 3 }
         }
       ]

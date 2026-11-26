@@ -18,7 +18,11 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
   await fs.mkdir(path.join(root, '.vscode'));
   await fs.writeFile(
     path.join(root, '.vscode/settings.json'),
-    '{"[cpp]":{"editor.tabSize":2,"editor.insertSpaces":false}}'
+    JSON.stringify({
+      '[cpp]': { 'editor.tabSize': 2, 'editor.insertSpaces': false },
+      'clangd.path': path.join(root, 'installation/Compiler/bin/clangd.exe'),
+      'C_Cpp.intelliSenseEngine': 'disabled'
+    })
   );
   await fs.writeFile(
     path.join(root, '.vscode/c_cpp_properties.json'),
@@ -28,6 +32,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       ]
     })
   );
+  await fs.writeFile(path.join(root, '.clangd'), 'CompileFlags:\n  Add: [-DWH_EDITING]\n');
   await fs.mkdir(path.join(root, 'installation'));
   await fs.writeFile(path.join(root, 'installation/windhawk.ini'), '[Storage]\nPortable=1\n');
   await fs.mkdir(path.join(root, 'installation/Compiler/bin'), { recursive: true });
@@ -43,12 +48,18 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     projectLoads = 0,
     entryScans = 0;
   const sourceReads = new Map();
+  const legacyPreferences = {
+    version: 2,
+    computer: { installationPath: '', integration: 'cpp', installations: {} },
+    projects: { [root]: { integration: 'both' } }
+  };
+  let localPreferenceWrites = 0;
   const commands = new Map(),
     watchers = [],
     messages = [],
     documents = [],
     stored = {},
-    globalStored = {},
+    globalStored = { localPreferences: structuredClone(legacyPreferences) },
     generations = new Map(),
     // VS Code settings as user-level values, and the target of each write.
     vscodeSettings = {},
@@ -167,6 +178,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
   context.globalState = {
     get: (key, fallback) => globalStored[key] ?? fallback,
     update: async (key, value) => {
+      if (key === 'localPreferences') localPreferenceWrites++;
       globalStored[key] = value;
     }
   };
@@ -271,7 +283,8 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       }
       assert.fail('Adapter did not reach expected state: ' + JSON.stringify(project()));
     };
-    const project = () => messages.filter(message => message.type === 'state').at(-1)?.projects[0];
+    const sidebarState = () => messages.filter(message => message.type === 'state').at(-1);
+    const project = (projectRoot = root) => sidebarState()?.projects.find(project => project.root === projectRoot);
     await settle(() => project()?.entries.every(entry => entry.status === 'current'));
     // Typing in files outside every project must not rebuild diagnostics or the sidebar.
     const statesBeforeTyping = messages.filter(message => message.type === 'state').length;
@@ -285,15 +298,19 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     assert.deepEqual([...commands.keys()].sort(), contributed.sort());
     assert.equal(project().entries.length, 2);
     assert.equal(project().editor.installationPath, path.join(root, 'installation'));
+    assert.equal(sidebarState().computer.integration, 'cpp');
+    assert.equal(project().editor.integration, 'clangd');
     assert.equal(project().editor.indentSize, 2);
     assert.equal(project().editor.indentStyle, 'tabs');
     await settle(() => project().editorNeedsApply === true);
-    // Local preference saves never write generation, formatting, or editor files.
-    const filesBeforePreferences = await Promise.all(
-      ['windhawk-amalgamation.json', '.vscode/settings.json', '.vscode/c_cpp_properties.json'].map(file =>
-        fs.readFile(path.join(root, file))
-      )
-    );
+    // Computer preference changes never write generation, formatting, or editor files.
+    const projectFiles = [
+      'windhawk-amalgamation.json',
+      '.vscode/settings.json',
+      '.vscode/c_cpp_properties.json',
+      '.clangd'
+    ];
+    const filesBeforePreferences = await Promise.all(projectFiles.map(file => fs.readFile(path.join(root, file))));
     await receive({
       action: 'computerPreferences',
       settings: {
@@ -349,31 +366,40 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       action: 'computerPreferences',
       settings: { ...elevationSettings, elevation: 'none', gsudoPath: '' }
     });
-    await receive({ action: 'projectPreferences', root, settings: { integration: 'default' } });
-    assert.equal(project().editor.installationPath, path.join(root, 'installation'));
-    assert.equal(project().editor.integration, 'clangd');
-    assert.deepEqual(globalStored.localPreferences.projects[root], {});
+    const unconfiguredRoot = path.join(root, 'unconfigured');
+    await fs.mkdir(path.join(unconfiguredRoot, 'src'), { recursive: true });
+    await fs.writeFile(path.join(unconfiguredRoot, 'windhawk-amalgamation.json'), JSON.stringify(defaults));
+    onFolders({ added: [{ uri: Uri.file(unconfiguredRoot) }], removed: [] });
+    await settle(() => project(unconfiguredRoot)?.editor.integration === 'clangd');
     // Edits in the Settings editor apply too: a new default language service, and a new
     // elevation method closing the previous approval.
     const closesBeforeHandEdit = elevationCloses;
     await mock.workspace.getConfiguration('wham').update('languageService', 'both', mock.ConfigurationTarget.Global);
-    await settle(() => project().editor.integration === 'both');
+    await settle(() => project(unconfiguredRoot)?.editor.integration === 'both');
+    assert.equal(project().editor.integration, 'clangd');
+    await assert.rejects(fs.stat(path.join(unconfiguredRoot, '.vscode')), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(path.join(unconfiguredRoot, '.clangd')), { code: 'ENOENT' });
     await mock.workspace.getConfiguration('wham').update('elevation', 'sudo', mock.ConfigurationTarget.Global);
     await settle(() => project().elevation === 'sudo');
     assert.equal(elevationCloses, closesBeforeHandEdit + 1);
     await mock.workspace.getConfiguration('wham').update('elevation', 'none', mock.ConfigurationTarget.Global);
     await mock.workspace.getConfiguration('wham').update('languageService', 'clangd', mock.ConfigurationTarget.Global);
-    await settle(() => project().editor.integration === 'clangd' && project().elevation === 'none');
-    const filesAfterPreferences = await Promise.all(
-      ['windhawk-amalgamation.json', '.vscode/settings.json', '.vscode/c_cpp_properties.json'].map(file =>
-        fs.readFile(path.join(root, file))
-      )
-    );
+    await settle(() => project(unconfiguredRoot)?.editor.integration === 'clangd' && project().elevation === 'none');
+    onFolders({ added: [], removed: [{ uri: Uri.file(unconfiguredRoot) }] });
+    const filesAfterPreferences = await Promise.all(projectFiles.map(file => fs.readFile(path.join(root, file))));
     assert.deepEqual(filesAfterPreferences, filesBeforePreferences);
-    // External editor-file changes must not override an explicitly saved default.
-    watchers[0].change(Uri.file(path.join(root, '.vscode/c_cpp_properties.json')));
-    await settle(() => project().editor.integration === 'clangd');
-    await receive({ action: 'projectPreferences', root, settings: { integration: 'cpp' } });
+    const settingsFile = path.join(root, '.vscode/settings.json');
+    await fs.writeFile(
+      settingsFile,
+      JSON.stringify({
+        ...JSON.parse(filesBeforePreferences[1]),
+        'C_Cpp.intelliSenseEngine': 'default',
+        'clangd.enable': false
+      })
+    );
+    watchers[0].change(Uri.file(settingsFile));
+    await settle(() => project().editor.integration === 'cpp');
+    await receive({ action: 'select', root });
     assert.match(project().entries[0].metadata.diagnostics[0].message, /No Windhawk/);
     const one = path.join(root, 'src/one.cpp'),
       oneOutput = path.join(root, 'output/one.wh.cpp'),
@@ -640,9 +666,8 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       loadedProjects.every(project => project.editor.installationPath === path.join(root, 'installation')),
       'Every project uses the global installation, including indentation-only setup'
     );
-    assert.ok(
-      Object.values(globalStored.localPreferences.projects).every(project => project.installationPath === undefined)
-    );
+    const editorProject = () => project(newRoot);
+    assert.equal(editorProject().editor.integration, 'clangd', 'Indentation-only setup uses the computer default');
     // Default Apply reuses the summary, without installation or indentation prompts.
     const setupDialogs = [];
     mock.window.showInformationMessage = async (message, options, ...choices) => {
@@ -659,12 +684,10 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     await commands.get('windhawk.configureEditor')();
     assert.deepEqual(setupDialogs, ['Set up the editor?']);
     const beforeSkip = await fs.readFile(path.join(newRoot, '.vscode/settings.json'));
-    const preferencesBeforeSkip = JSON.stringify(globalStored.localPreferences);
     mock.window.showInformationMessage = async (message, options, ...choices) =>
       choices.find(choice => choice.title === 'Skip');
     await commands.get('windhawk.configureEditor')();
     assert.deepEqual(await fs.readFile(path.join(newRoot, '.vscode/settings.json')), beforeSkip);
-    assert.equal(JSON.stringify(globalStored.localPreferences), preferencesBeforeSkip);
     // Customize changes the service and indentation, with no final confirmation.
     const customDialogs = [];
     mock.window.showInformationMessage = async (message, options, ...choices) => {
@@ -680,14 +703,13 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     mock.window.showQuickPick = async choices => choices[0];
     await commands.get('windhawk.configureEditor')();
     assert.deepEqual(customDialogs, ['Set up the editor?', 'Choose language service', 'Choose indentation']);
-    assert.equal(globalStored.localPreferences.projects[newRoot].integration, 'cpp');
+    assert.equal(editorProject().editor.integration, 'cpp');
     const customized = JSON.parse(await fs.readFile(path.join(newRoot, '.vscode/settings.json'), 'utf8'))['[cpp]'];
     assert.equal(customized['editor.insertSpaces'], false);
     assert.equal(customized['editor.tabSize'], 2, 'Tabs preserve the existing display width');
-    // Apply is direct; Review opens a diff without changing files or preferences.
+    // Apply is direct; Review opens a diff without changing the files or the reported service.
     const settings = {
       ...require('../dist/setup').editorDefaults,
-      ...globalStored.localPreferences.projects[newRoot],
       indentSize: 4
     };
     mock.window.showQuickPick = async () => {
@@ -698,16 +720,6 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       JSON.parse(await fs.readFile(path.join(newRoot, '.vscode/settings.json'), 'utf8'))['[cpp]']['editor.tabSize'],
       4
     );
-    assert.equal(
-      globalStored.localPreferences.projects[newRoot].integration,
-      'cpp',
-      'Apply also saves the selected language service locally'
-    );
-    const editorProject = () =>
-      messages
-        .filter(message => message.type === 'state')
-        .at(-1)
-        .projects.find(project => project.root === newRoot);
     assert.equal(editorProject().editorNeedsApply, false, 'A complete applied configuration has no pending work');
     await fs.unlink(path.join(newRoot, '.vscode/c_cpp_properties.json'));
     watchers
@@ -738,13 +750,8 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       root: newRoot,
       settings: { ...settings, integration: 'clangd', indentSize: 3 }
     });
-    assert.equal(
-      globalStored.localPreferences.projects[newRoot].integration,
-      'cpp',
-      'Review does not save the proposed language service'
-    );
+    assert.equal(editorProject().editor.integration, 'cpp');
     assert.equal(reviewDiffs, 1);
-    assert.equal(globalStored.localPreferences.projects[newRoot].indentSize, undefined);
     assert.deepEqual(await fs.readFile(path.join(newRoot, '.vscode/settings.json')), beforeReview);
     assert.equal(messages.filter(message => message.type === 'editorSaved').length, savedBeforeReview);
     documents.push({ uri: Uri.file(path.join(newRoot, '.vscode/settings.json')), isDirty: true });
@@ -752,6 +759,13 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     documents.length = 0;
     assert.match(messages.at(-1).message, /Save or revert/);
     assert.deepEqual(await fs.readFile(path.join(newRoot, '.vscode/settings.json')), beforeReview);
+    await receive({ action: 'editor', root: newRoot, settings: { ...settings, integration: 'clangd' } });
+    const appliedSettings = JSON.parse(await fs.readFile(path.join(newRoot, '.vscode/settings.json'), 'utf8'));
+    assert.equal(appliedSettings['clangd.enable'], true);
+    assert.equal(appliedSettings['C_Cpp.intelliSenseEngine'], 'disabled');
+    assert.match(await fs.readFile(path.join(newRoot, '.clangd'), 'utf8'), /WHAM editor configuration begin/);
+    assert.equal(editorProject().editor.integration, 'clangd');
+    assert.equal(editorProject().editorNeedsApply, false);
     // Two conflicting recovery copies compare directly without left/right pickers.
     let conflictPicks = 0,
       copyDiffs = 0;
@@ -1077,6 +1091,8 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     await extension.activate(context);
     await commands.get('windhawk.openProject')();
     assert.equal(globalStored.recentProjects[0], plainRoot);
+    assert.equal(localPreferenceWrites, 0);
+    assert.deepEqual(globalStored.localPreferences, legacyPreferences);
   } finally {
     for (const subscription of context.subscriptions) subscription.dispose();
     await fs.rm(root, { recursive: true, force: true });

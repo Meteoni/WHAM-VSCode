@@ -24,19 +24,16 @@ test('sidebar messages are validated and scoped', () => {
   assert.equal(parseSidebarMessage({ action: 'computerPreferences', settings: computer }).settings, computer);
   for (const settings of [undefined, { ...computer, elevation: 'admin' }, { ...computer, integration: 'vim' }])
     assert.throws(() => parseSidebarMessage({ action: 'checkElevation', settings }), /Invalid computer preferences/);
-  assert.throws(
-    () => parseSidebarMessage({ action: 'projectPreferences', root: 'r', settings: {} }),
-    /Invalid local project preferences/
-  );
-  // A missing or null language service keeps the saved preference.
+  // A missing or null language service keeps the current service.
   assert.equal(
     parseSidebarMessage({ action: 'editor', root: 'r', settings: { integration: null } }).integration,
     undefined
   );
-  assert.throws(
-    () => parseSidebarMessage({ action: 'reviewEditor', root: 'r', settings: { integration: 'vim' } }),
-    /valid C\+\+ language service/
-  );
+  for (const integration of ['vim', 'default'])
+    assert.throws(
+      () => parseSidebarMessage({ action: 'reviewEditor', root: 'r', settings: { integration } }),
+      /valid C\+\+ language service/
+    );
   assert.throws(() => parseSidebarMessage({ action: 'selfDestruct' }), /Unknown sidebar action: selfDestruct/);
 });
 
@@ -90,7 +87,7 @@ test('every action the sidebar webview sends is accepted, and the reverse', () =
   collect(compileMenu, /\[\s*'(\w+)',/g); // compile-menu entries
   for (const action of sent) assert.ok(sidebarActions.includes(action), `sidebar.js sends unhandled action ${action}`);
   // Handled for tests and older webview states, but not sent by the current sidebar UI.
-  const notSentByUi = ['checkElevation', 'projectPreferences', 'select'];
+  const notSentByUi = ['checkElevation', 'select'];
   for (const action of sidebarActions)
     assert.ok(sent.has(action) || notSentByUi.includes(action), `No sidebar UI sends ${action}`);
 });

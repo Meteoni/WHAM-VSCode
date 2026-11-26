@@ -58,7 +58,7 @@
             <button type="submit" class="primary">Save configuration</button><p id="settings-status" role="status"></p>
           </form>
           <form id="editor-config">
-            <label>C++ language service<select name="integration"><option value="default">Use default</option><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
+            <label>C++ language service<select name="integration"><option value="cpp">Microsoft C/C++</option><option value="clangd">clangd</option><option value="both">Configure both</option></select></label>
             <label>Indentation<select name="indentStyle"><option value="spaces">Spaces</option><option value="tabs">Tabs</option></select></label>
             <label>Tab width<input name="indentSize" type="number" min="1" max="16" value="4" required></label>
             <div class="toolbar"><button type="submit" class="primary" id="apply-editor" title="Apply editor settings. Writes editor configuration and .clang-format.">Apply</button><button type="submit" data-editor-review title="Review proposed editor changes without saving them.">Review…</button></div><p id="editor-status" role="status"></p>

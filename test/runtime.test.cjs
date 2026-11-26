@@ -885,7 +885,9 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     await detailViews.at(-1).callbacks.onNavigate('project');
     // The optional custom compiler follows the same reveal policy.
     await mock.workspace.getConfiguration('wham').update('windhawkPath', '');
-    await receive({ action: 'projectPreferences', root, settings: { integration: 'default' } });
+    await until(
+      () => messages.filter(message => message.type === 'state').at(-1)?.projects[0]?.editor.installationPath === ''
+    );
     mock.window.showInputBox = async options =>
       options.title === 'Compiler executable' ? 'fixture-compiler.exe' : JSON.stringify(['-fsyntax-only']);
     let customOutput = outputShows;

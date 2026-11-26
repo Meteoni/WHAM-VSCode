@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- WHAM reads each project's C++ language service from its editor files. **Settings → Editor** shows the configured service and writes the selected service when you apply changes. The default in **Extension settings** applies only to projects whose editor files configure no service.
 - The sidebar updates only the mod cards that changed. Open compile menus, the mod page's More menu, the project list and keyboard focus are no longer reset by updates about other mods; a card that does change keeps its open menu and focused control.
 - Generated outputs no longer record `generate` and `debounceMs`. Switching between after-save and manual generation, or changing the debounce, no longer rewrites every output or marks installed mods as uncompiled. Existing outputs regenerate once after upgrading, so compiled mods show as uncompiled until they're compiled again. Recovered projects start with the default generation settings.
 - After save / Manual and the debounce are now VS Code settings, `wham.generate` (per project) and `wham.debounceMs`, instead of fields in `windhawk-amalgamation.json`. **Settings → Generation** and **WHAM: Toggle Generate on Save** still change them, without editing the project file. Older projects keep using the values in their file until a setting is set; WHAM drops them from the file the next time it saves it. New and recovered projects no longer write them. Switching to Manual cancels a generation still waiting on its debounce.

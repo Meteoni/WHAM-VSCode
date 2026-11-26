@@ -10,7 +10,7 @@ Write a Windhawk mod across several C++ files, then generate a single `.wh.cpp` 
 
 1. Install the WHAM `.vsix` through **Extensions: Install from VSIX…** in VS Code.
 2. Open **WHAM** in the activity bar. Choose **New project**, **Existing project**, or **Recover mods**.
-3. Apply the suggested editor setup, customize it, or skip it. **Extension settings** holds installation and elevation preferences; **Project settings → Editor** holds local project choices and formatting.
+3. Apply the suggested editor setup, customize it, or skip it. **Extension settings** holds installation and elevation preferences. **Project settings → Editor** shows the C++ language service and indentation from the project's editor files. Use **Apply** there to write your choices to those files.
 
 **Open project** remembers recent folders and opens existing WHAM projects without setup prompts. Browse to select another source folder.
 
@@ -36,7 +36,7 @@ If you edit generated output, WHAM pauses regeneration so your changes aren't ov
 
 The preview works without Windhawk. Compilation and installed-mod controls need a compatible Windhawk 2.0 CLI. See the [user guide](docs/guide.md) for configuration, CLI commands, and supported C++ constructs.
 
-Standard Windhawk installs need elevation for compilation and installed-mod changes. Choose **Windows sudo** (may require more prompts) or **gsudo** (once per VS Code session) under **Extension settings**. WHAM detects gsudo on PATH or in Scoop. **None** uses VS Code's current permissions. Extension settings are saved as VS Code user settings (`wham.windhawkPath`, `wham.elevation`, `wham.gsudoPath`, `wham.languageService`), so you can also change them in the Settings editor. The paths and elevation method stay on this computer and aren't synced. Saving them doesn't change project files; **Apply editor settings** does.
+Standard Windhawk installs need elevation for compilation and installed-mod changes. Choose **Windows sudo** (may require more prompts) or **gsudo** (once per VS Code session) under **Extension settings**. WHAM detects gsudo on PATH or in Scoop. **None** uses VS Code's current permissions. Extension settings are saved as VS Code user settings (`wham.windhawkPath`, `wham.elevation`, `wham.gsudoPath`, `wham.languageService`), so you can also change them in the Settings editor. The paths and elevation method stay on this computer and aren't synced. The default language service applies to projects whose editor files configure none. A configured project keeps its choice when you copy those files to another computer.
 
 ## Building
 

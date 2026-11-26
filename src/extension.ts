@@ -100,8 +100,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   /** Whether any open editor holds unsaved changes for this file. Generation reads only saved files. */
   const isDirty = (file: string) =>
     vscode.workspace.textDocuments.some(document => document.isDirty && sameFile(document.uri.fsPath, file));
-  const projectPreferences = (root: string) =>
-    localPreferences.projects[Object.keys(localPreferences.projects).find(key => sameFile(key, root)) ?? root] ?? {};
   await migrateComputerPreferences(context.globalState, localPreferences, {
     isSet: setting => vscode.workspace.getConfiguration('wham').inspect(setting)?.globalValue !== undefined,
     set: (setting, value) =>
@@ -129,20 +127,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const { elevation, gsudoPath } = computer();
     return { elevation, gsudoPath };
   };
-  /** Replace a project's local preference entry, whatever casing it was stored under. */
-  const setProjectPreference = async (root: string, preference: { integration?: EditorSettings['integration'] }) => {
-    const previousKey = Object.keys(localPreferences.projects).find(key => sameFile(key, root));
-    if (previousKey) delete localPreferences.projects[previousKey];
-    localPreferences.projects[root] = preference;
-    await context.globalState.update('localPreferences', localPreferences);
-  };
-  const resolveEditor = async (root: string) => {
-    const formatting = await readEditorSettings(root);
-    const overrides = projectPreferences(root);
+  const resolveEditor = (applied: Awaited<ReturnType<typeof readEditorSettings>>): EditorSettings => {
+    const { installationPath, integration } = computer();
     return {
-      ...formatting,
-      installationPath: computer().installationPath,
-      integration: overrides.integration ?? computer().integration
+      ...applied,
+      installationPath,
+      integration: applied.integration ?? integration
     };
   };
   /** A timing value set in user, workspace or folder settings, with the level that holds it. */
@@ -286,7 +276,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         config: { ...item.project.config, ...timing(item) },
         editor: item.editor,
         editorNeedsApply: item.editorNeedsApply,
-        local: projectPreferences(item.project.root),
         elevation: computer().elevation,
         git: item.git,
         windhawk: item.windhawk,
@@ -359,7 +348,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       refreshRuntime: state => refreshRuntime(state),
       refreshEditorConfiguration: state => refreshEditorConfiguration(state),
       editorFilesChanged: async state => {
-        state.editor = await resolveEditor(state.project.root);
+        state.editor = resolveEditor(await readEditorSettings(state.project.root));
         await refreshEditorConfiguration(state);
         publish();
       },
@@ -388,7 +377,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       )
         await closeElevationSessions();
       for (const project of projects.values()) {
-        project.editor = await resolveEditor(project.project.root);
+        project.editor = resolveEditor(await readEditorSettings(project.project.root));
         await refreshRuntime(project);
         await refreshDraft(project);
       }
@@ -598,24 +587,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       publish();
       return projects.get(loadedRoot)!;
     }
-    if (!Object.keys(localPreferences.projects).some(key => sameFile(key, root))) {
-      // Adopt a usable old installation only if none is selected globally.
-      const applied = await readEditorSettings(root);
-      if (!computer().installationPath && applied.installationPath) {
-        let usable = false;
-        try {
-          await fs.access(path.join(applied.installationPath, 'windhawk.ini'));
-          usable = true;
-        } catch {
-          /* A copied project's path may not exist on this computer. */
-        }
-        if (usable) {
-          await saveComputer({ installationPath: applied.installationPath });
-          await applyComputerPreferences();
-        }
+    const applied = await readEditorSettings(root);
+    if (!computer().installationPath && applied.installationPath) {
+      let usable = false;
+      try {
+        await fs.access(path.join(applied.installationPath, 'windhawk.ini'));
+        usable = true;
+      } catch {
+        /* A copied project's path may not exist on this computer. */
       }
-      localPreferences.projects[root] = applied.installationPath ? { integration: applied.integration } : {};
-      await context.globalState.update('localPreferences', localPreferences);
+      if (usable) {
+        await saveComputer({ installationPath: applied.installationPath });
+        await applyComputerPreferences();
+      }
     }
     const state: ProjectState = {
       project: { root, config: { ...defaults } },
@@ -624,7 +608,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       pending: new Set(),
       draftPending: new Set(),
       retained: [],
-      editor: await resolveEditor(root)
+      editor: resolveEditor(applied)
     };
     projects.set(root, state);
     const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '**/*'));
@@ -1044,10 +1028,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Editor preferences and toolchain paths are local; formatting and recommendations are shared.
     if (disposed || state.removed) throw new Error('This project was closed.');
     await appendIgnoreRules(state.project, ['/.vscode/settings.json', '/.vscode/c_cpp_properties.json', '/.clangd']);
-    state.editor = await resolveEditor(state.project.root);
+    state.editor = resolveEditor(await readEditorSettings(state.project.root));
     state.windhawk = windhawk;
     await refreshRuntime(state);
-    // Applying files does not change the independently saved local preferences.
     state.git = await gitStatus(state.project.root, gitExecutable());
     publish();
     if (settings.integration !== 'clangd' && vscode.extensions.getExtension('ms-vscode.cpptools')) {
@@ -1164,12 +1147,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await saveComputer({ installationPath: settings.installationPath });
       await applyComputerPreferences();
     }
-    if ((await applyEditor(state, settings)) && !indentationOnly && settings.integration !== state.editor.integration) {
-      await setProjectPreference(state.project.root, { integration: settings.integration });
-      state.editor = await resolveEditor(state.project.root);
-      await refreshEditorConfiguration(state);
-      publish();
-    }
+    await applyEditor(state, settings);
   };
   const chooseEntry = async (state: ProjectState, onlyCurrent = false): Promise<EntryState | undefined> => {
     const file = vscode.window.activeTextEditor?.document.uri.fsPath;
@@ -1415,20 +1393,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     state: ProjectState,
     message: Extract<ProjectMessage, { action: 'editor' | 'reviewEditor' }>
   ) => {
-    const integration = message.integration ?? projectPreferences(state.project.root).integration ?? 'default';
     const settings = {
       ...state.editor,
-      integration: integration === 'default' ? computer().integration : integration,
+      integration: message.integration ?? state.editor.integration,
       indentStyle: message.indentStyle as EditorSettings['indentStyle'],
       indentSize: message.indentSize as number
     };
-    if (await applyEditor(state, settings, message.action === 'reviewEditor')) {
-      await setProjectPreference(state.project.root, integration === 'default' ? {} : { integration });
-      state.editor = await resolveEditor(state.project.root);
-      await refreshEditorConfiguration(state);
-      publish();
+    if (await applyEditor(state, settings, message.action === 'reviewEditor'))
       await postToSidebar({ type: 'editorSaved', root: state.project.root });
-    } else if (message.action === 'reviewEditor')
+    else if (message.action === 'reviewEditor')
       await postToSidebar({ type: 'editorReviewed', root: state.project.root });
   };
   const refreshGit = async (state: ProjectState) => {
@@ -1483,18 +1456,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       gitSetup: async state => {
         await setupProject(state.project.root, { git: gitExecutable() });
         await refreshGit(state);
-      },
-      projectPreferences: async (state, message) => {
-        if (anyBusy([state])) throw new Error('Wait for the current Windhawk operation before changing preferences.');
-        await setProjectPreference(
-          state.project.root,
-          message.integration !== 'default' ? { integration: message.integration } : {}
-        );
-        state.editor = await resolveEditor(state.project.root);
-        await refreshRuntime(state);
-        await refreshDraft(state);
-        publish();
-        await postToSidebar({ type: 'projectPreferencesSaved' });
       },
       editor: applyEditorFromSidebar,
       reviewEditor: applyEditorFromSidebar,

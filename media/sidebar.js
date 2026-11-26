@@ -70,7 +70,7 @@ function updateEditorActions() {
   const project = state.projects.find(project => project.root === currentRoot);
   editorDirty =
     !!project &&
-    (editorForm.elements.namedItem('integration').value !== (project.local?.integration ?? 'default') ||
+    (editorForm.elements.namedItem('integration').value !== project.editor.integration ||
       editorForm.elements.namedItem('indentStyle').value !== project.editor.indentStyle ||
       Number(editorForm.elements.namedItem('indentSize').value) !== project.editor.indentSize);
   const pending = !!project && (editorDirty || project.editorNeedsApply !== false || editorFailed);
@@ -639,13 +639,10 @@ function render() {
     }
   if (project?.editor && !editorDirty)
     for (const [key, value] of Object.entries(project.editor)) {
-      if (['installationPath', 'integration'].includes(key)) continue;
+      if (key === 'installationPath') continue;
       const input = editorForm.elements.namedItem(key);
       if (input) input.value = value;
     }
-  if (project?.editor && !editorDirty) {
-    editorForm.elements.namedItem('integration').value = project.local?.integration ?? 'default';
-  }
   updateEditorActions();
   updateSaveActions();
 }
@@ -735,10 +732,6 @@ window.addEventListener('message', event => {
   if (event.data.type === 'editorReviewed' && event.data.root === currentRoot) {
     editorReviewing = false;
     updateEditorActions();
-  }
-  if (event.data.type === 'projectPreferencesSaved') {
-    editorDirty = false;
-    render();
   }
   if (event.data.type === 'computerSaved') {
     computerSaving = false;

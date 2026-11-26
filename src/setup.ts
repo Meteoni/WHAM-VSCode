@@ -41,11 +41,8 @@ function replaceManagedSection(existing: string | undefined, label: string, valu
   return (text.trim() ? text.trimEnd() + '\n---\n' : '') + fragment + '\n';
 }
 
-/** Recover applied preferences when opening a project in a different VS Code workspace. */
-export async function readEditorSettings(
-  root: string,
-  saved: EditorSettings = editorDefaults
-): Promise<EditorSettings> {
+/** Read applied editor settings, leaving the service unset if the files do not configure one. */
+export async function readEditorSettings(root: string) {
   const contents = await Promise.all(
     ['.vscode/settings.json', '.vscode/c_cpp_properties.json', '.clang-format'].map(async file => {
       return (await readIfExists(path.join(root, file)))?.toString('utf8') ?? '';
@@ -68,7 +65,10 @@ export async function readEditorSettings(
   const compiler = [cppCompiler, clangdCompiler].find(
     file => path.isAbsolute(file) && /[\\/]Compiler[\\/]bin[\\/]clang(?:\+\+|d)\.exe$/i.test(file)
   );
-  const result = { ...saved };
+  const result: Omit<EditorSettings, 'integration'> & { integration?: EditorSettings['integration'] } = {
+    ...editorDefaults,
+    integration: undefined
+  };
   if (compiler) result.installationPath = path.resolve(path.dirname(path.dirname(path.dirname(compiler))));
   else
     for (const executable of [cppCompiler, clangdCompiler]) {

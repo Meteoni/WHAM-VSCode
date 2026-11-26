@@ -14,6 +14,7 @@ export interface LocalPreferences {
     integration: EditorSettings['integration'];
     installations: Record<string, InstallationPreferences>;
   };
+  /** Kept for older WHAM versions. A project's language service now comes from its editor files. */
   projects: Record<string, { integration?: EditorSettings['integration'] }>;
 }
 
