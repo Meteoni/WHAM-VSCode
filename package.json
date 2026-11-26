@@ -29,6 +29,7 @@
     "build": "tsc -p .",
     "build:bridge": "node scripts/build-bridge.cjs",
     "test": "npm run build && node --test test/*.test.cjs",
+    "test:host": "node test/run-host.cjs",
     "format": "prettier --write \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"media/*.js\" \"test/*.cjs\" \"scripts/*.cjs\"",
     "lint": "eslint src media/*.js test scripts",

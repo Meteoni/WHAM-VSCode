@@ -50,6 +50,12 @@ npm run package
 
 Packaging creates a `.vsix` in this folder. Press **F5** in VS Code to launch a development host.
 
+### Testing in real VS Code
+
+Extract the stable Windows x64 ZIP so `Code.exe` is at `work/vscode-portable/Code.exe`.
+After `npm run build`, run `npm run test:host`. [Download the ZIP](https://update.code.visualstudio.com/latest/win32-x64-archive/stable)
+The disposable profile, extensions, temporary files, test projects, and results stay under `work/`.
+
 ## License
 
 WHAM's own code is [MIT licensed](LICENSE). The bundled Windhawk renderer, icon, and adapted syntax grammar are GPLv3; see [third-party notices](THIRD-PARTY-NOTICES.md). WHAM is an independent project.
