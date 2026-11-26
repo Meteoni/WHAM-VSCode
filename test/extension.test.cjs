@@ -64,7 +64,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     // VS Code settings as user-level values, and the target of each write.
     vscodeSettings = {},
     settingTargets = {};
-  let onSettings, beforeSettingWrite, beforeInspectInstallation;
+  let onSettings, beforeSettingWrite, beforeInspectInstallation, runtimeCalls;
   const workspaceSettings = {};
   const disposable = () => ({ dispose() {} });
   const Uri = {
@@ -206,9 +206,18 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
       return {
         ...windhawk,
         inspectWindhawk: async root => {
-          const installation = await windhawk.inspectWindhawk(root);
+          const installation = runtimeCalls ? { root, parser: false, cli: true } : await windhawk.inspectWindhawk(root);
           await beforeInspectInstallation?.(root);
           return installation;
+        },
+        readInstalledMod: (root, id) =>
+          runtimeCalls && id === 'local@settings-race'
+            ? Promise.resolve({ config: { disabled: true } })
+            : windhawk.readInstalledMod(root, id),
+        runWindhawkCli: async (root, args, input, onOutput, signal, elevation) => {
+          if (!runtimeCalls) return windhawk.runWindhawkCli(root, args, input, onOutput, signal, elevation);
+          runtimeCalls.push({ root, action: args[1], elevation });
+          return args[1] === 'install' ? { id: 'local@settings-race' } : { id: args[2], enabled: args[1] === 'enable' };
         },
         inspectElevation: async () => ({ notice: 'fixture ready' }),
         closeElevationSessions: async () => {
@@ -529,6 +538,76 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
         releasePoll?.();
         beforeInspectInstallation = undefined;
         await fs.unlink(cli);
+        await receive({ action: 'computerPreferences', settings: normalComputerSettings });
+      }
+    });
+    await t.test('installed-mod operations use matching settings while projects refresh', async () => {
+      const oldInstallation = normalComputerSettings.installationPath;
+      const newInstallation = path.join(root, 'settings-race-installation');
+      const runtimeRoot = path.join(root, 'settings-race-project');
+      const entry = path.join(runtimeRoot, 'src/mod.cpp');
+      await fs.mkdir(path.dirname(entry), { recursive: true });
+      await fs.writeFile(path.join(runtimeRoot, 'windhawk-amalgamation.json'), JSON.stringify(defaults));
+      await fs.writeFile(
+        entry,
+        '// ==WindhawkMod==\n// @id settings-race\n// @name Settings race\n// @version 1.0\n// ==/WindhawkMod==\nint mod;\n'
+      );
+      await fs.mkdir(newInstallation);
+      await fs.copyFile(path.join(oldInstallation, 'windhawk.ini'), path.join(newInstallation, 'windhawk.ini'));
+      const newElevation = { elevation: 'gsudo', gsudoPath: 'new-gsudo' };
+      const releaseProbes = [];
+      let saving;
+      runtimeCalls = [];
+      try {
+        onFolders({ added: [{ uri: Uri.file(runtimeRoot) }], removed: [] });
+        await settle(() => project(runtimeRoot)?.entries[0]?.runtime.installed);
+        beforeInspectInstallation = async installation => {
+          if (installation === newInstallation) await new Promise(resolve => releaseProbes.push(resolve));
+        };
+        saving = receive({
+          action: 'computerPreferences',
+          settings: { ...normalComputerSettings, installationPath: newInstallation, ...newElevation }
+        });
+        const compile = () => receive({ action: 'compile', root: runtimeRoot, entry });
+        const toggle = enabled => receive({ action: 'enable', root: runtimeRoot, entry, enabled });
+        // Hold the first project's refresh so the next project still has its old installation.
+        await settle(() => releaseProbes.length === 1);
+        await toggle(true);
+        await toggle(false);
+        await compile();
+        releaseProbes[0]();
+        // Start operations again while this project's new installation is being detected.
+        await settle(() => releaseProbes.length === 2);
+        await toggle(true);
+        await toggle(false);
+        const compiling = compile();
+        beforeInspectInstallation = undefined;
+        releaseProbes[1]();
+        await Promise.all([saving, compiling]);
+        await toggle(true);
+        const oldElevation = { elevation: 'none', gsudoPath: '' };
+        await receive({
+          action: 'computerPreferences',
+          settings: { ...normalComputerSettings, installationPath: newInstallation }
+        });
+        await toggle(false);
+        const oldCalls = ['enable', 'disable', 'install'].map(action => ({
+          root: oldInstallation,
+          action,
+          elevation: oldElevation
+        }));
+        assert.deepEqual(runtimeCalls, [
+          ...oldCalls,
+          ...oldCalls,
+          { root: newInstallation, action: 'enable', elevation: newElevation },
+          { root: newInstallation, action: 'disable', elevation: oldElevation }
+        ]);
+      } finally {
+        beforeInspectInstallation = undefined;
+        for (const release of releaseProbes) release();
+        await saving;
+        onFolders({ added: [], removed: [{ uri: Uri.file(runtimeRoot) }] });
+        runtimeCalls = undefined;
         await receive({ action: 'computerPreferences', settings: normalComputerSettings });
       }
     });

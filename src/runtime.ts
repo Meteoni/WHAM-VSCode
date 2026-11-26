@@ -46,7 +46,7 @@ export interface RuntimeHost {
   refreshDraft(state: ProjectState, entries?: EntryState[]): Promise<void>;
   refreshEditorConfiguration(state: ProjectState): Promise<void>;
   /** How to elevate Windhawk CLI calls; one choice for the selected installation. */
-  installationPreferences(): InstallationPreferences;
+  installationPreferences(state: ProjectState): InstallationPreferences;
   compiledSnapshots(): Record<string, CompiledSnapshot>;
   saveCompiledSnapshots(builds: Record<string, CompiledSnapshot>): PromiseLike<unknown>;
   tools: RuntimeTools;
@@ -130,12 +130,16 @@ export function createRuntimeOperations(host: RuntimeHost) {
           )
         ).join('|')
       : '';
-    if (!state.windhawk || state.windhawk.root !== root || state.windhawkStamp !== stamp) {
-      state.windhawk = await tools.inspectWindhawk(root);
-      state.windhawkStamp = stamp;
-      await host.refreshDraft(state);
-    }
-    const installation = state.windhawk;
+    const previousInstallation = state.windhawk;
+    const needsInspection =
+      !previousInstallation || previousInstallation.root !== root || state.windhawkStamp !== stamp;
+    const detected = needsInspection ? await tools.inspectWindhawk(root) : previousInstallation;
+    // Keep the previous pair available while detection runs. A probe can finish after editor settings change.
+    if (stopped(state) || state.editor.installationPath !== root) return;
+    const installation = { ...detected, installationPreferences: state.editor.installationPreferences };
+    state.windhawk = installation;
+    state.windhawkStamp = stamp;
+    if (needsInspection) await host.refreshDraft(state);
     const entries = [...state.entries.values()];
     await Promise.all(
       entries.map(async entry => {
@@ -184,7 +188,7 @@ export function createRuntimeOperations(host: RuntimeHost) {
       return;
     }
     // Settings can change while saving or generating the source.
-    const elevation = testOnly ? undefined : host.installationPreferences();
+    const elevation = testOnly ? undefined : host.installationPreferences(state);
     const abort = new AbortController();
     entry.abort = abort;
     setBusy(entry, testOnly ? 'test' : 'compile');
@@ -304,6 +308,7 @@ export function createRuntimeOperations(host: RuntimeHost) {
       host.inform('This mod already has an operation running.');
       return;
     }
+    const elevation = host.installationPreferences(state);
     installedOperations.set(key, entry);
     const abort = new AbortController();
     entry.abort = abort;
@@ -316,7 +321,7 @@ export function createRuntimeOperations(host: RuntimeHost) {
         undefined,
         undefined,
         abort.signal,
-        host.installationPreferences()
+        elevation
       );
       if (result?.id !== modId || result.enabled !== enabled)
         throw new Error('Windhawk returned an unsupported enable/disable response. Update Windhawk.');

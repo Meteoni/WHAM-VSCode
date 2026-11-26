@@ -2,6 +2,7 @@ import path from 'node:path';
 import { portableRelative } from './config';
 import { checksum, restoreSource } from './engine';
 import type { ModMetadata } from './metadata';
+import type { InstallationPreferences } from './preferences';
 import type { EditorSettings, gitStatus } from './setup';
 import type { Diagnostic, GenerationResult, Project } from './types';
 import type { InstalledMod, ParsedModSource, WindhawkInstallation } from './windhawk';
@@ -70,9 +71,9 @@ export interface ProjectState {
   pollInstalled?: boolean;
   /** Entries waiting for the Draft refresh debounce. */
   draftPending: Set<string>;
-  windhawk?: WindhawkInstallation;
+  windhawk?: WindhawkInstallation & { installationPreferences: InstallationPreferences };
   windhawkStamp?: string;
-  editor: EditorSettings;
+  editor: EditorSettings & { installationPreferences: InstallationPreferences };
   editorNeedsApply?: boolean;
   git?: Awaited<ReturnType<typeof gitStatus>>;
 }

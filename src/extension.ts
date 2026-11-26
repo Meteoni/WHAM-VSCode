@@ -128,15 +128,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!savingComputer) await applyComputerPreferences();
     }
   };
-  const installationPreferences = (): InstallationPreferences => {
-    const { elevation, gsudoPath } = computer();
-    return { elevation, gsudoPath };
-  };
-  const resolveEditor = (applied: Awaited<ReturnType<typeof readEditorSettings>>): EditorSettings => {
-    const { installationPath, integration } = computer();
+  const resolveEditor = (
+    applied: Awaited<ReturnType<typeof readEditorSettings>>,
+    preferences = computer()
+  ): ProjectState['editor'] => {
+    const { installationPath, integration, elevation, gsudoPath } = preferences;
     return {
       ...applied,
       installationPath,
+      installationPreferences: { elevation, gsudoPath },
       integration: applied.integration ?? integration
     };
   };
@@ -220,7 +220,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     enqueue: (state, targets) => enqueue(state, targets),
     refreshDraft: (state, entries) => refreshDraft(state, entries),
     refreshEditorConfiguration: state => refreshEditorConfiguration(state),
-    installationPreferences,
+    installationPreferences: state => state.windhawk?.installationPreferences ?? state.editor.installationPreferences,
     compiledSnapshots: () => context.globalState.get<Record<string, CompiledSnapshot>>('compiledSnapshots', {}),
     saveCompiledSnapshots: builds => context.globalState.update('compiledSnapshots', builds),
     tools: { inspectWindhawk, readInstalledMod, runWindhawkCli, runWindhawkProcess, checkModBuild }
@@ -387,7 +387,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // An earlier runtime poll must finish before replacing its installation state.
         const update = project.queue.then(async () => {
           if (disposed || project.removed) return;
-          project.editor = resolveEditor(await readEditorSettings(project.project.root));
+          project.editor = resolveEditor(await readEditorSettings(project.project.root), next);
           await refreshRuntime(project);
           await refreshDraft(project);
         });
@@ -1047,7 +1047,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (disposed || state.removed) throw new Error('This project was closed.');
     await appendIgnoreRules(state.project, ['/.vscode/settings.json', '/.vscode/c_cpp_properties.json', '/.clangd']);
     state.editor = resolveEditor(await readEditorSettings(state.project.root));
-    state.windhawk = windhawk;
+    if (windhawk.root === state.editor.installationPath)
+      state.windhawk = { ...windhawk, installationPreferences: state.editor.installationPreferences };
     await refreshRuntime(state);
     state.git = await gitStatus(state.project.root, gitExecutable());
     publish();
