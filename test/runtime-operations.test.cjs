@@ -52,7 +52,7 @@ function projectState(name = 'project') {
 }
 
 /** Runtime operations over `projects`, with fake Windhawk tools that record every call. */
-function harness(projects, tools = {}) {
+function harness(projects, tools = {}, installationPreferences = () => ({ elevation: 'none', gsudoPath: '' })) {
   const events = { informed: [], errors: [], logs: [], cli: [], snapshots: {} };
   let generation;
   const runtime = createRuntimeOperations({
@@ -73,7 +73,7 @@ function harness(projects, tools = {}) {
     },
     refreshDraft: async () => {},
     refreshEditorConfiguration: async () => {},
-    installationPreferences: () => ({ elevation: 'none', gsudoPath: '' }),
+    installationPreferences,
     compiledSnapshots: () => events.snapshots,
     saveCompiledSnapshots: async builds => (events.snapshots = builds),
     tools: {
@@ -145,6 +145,41 @@ test('an installed, enabled mod stays enabled when recompiled', async () => {
   });
   await runtime.compileMod(state, entry);
   assert.deepEqual(events.cli, [['mod', 'install', '--file', '-']]);
+});
+
+test('compile keeps its starting installation and elevation when settings change', async () => {
+  const { state, entry } = projectState();
+  const startingPreferences = { elevation: 'gsudo', gsudoPath: path.join(installation, 'gsudo.exe') };
+  let preferences = startingPreferences;
+  let installedRead, finishInstalledRead;
+  const readingInstalled = new Promise(resolve => (installedRead = resolve));
+  const installed = new Promise(resolve => (finishInstalledRead = resolve));
+  const installs = [];
+  const { runtime, events } = harness(
+    [state],
+    {
+      readInstalledMod: async () => {
+        installedRead();
+        return installed;
+      },
+      runWindhawkCli: async (rootPath, args, input, onOutput, signal, elevation) => {
+        installs.push({ rootPath, elevation });
+        return { id: 'local@demo-mod', config: { libraryFileName: 'demo_1.dll' } };
+      }
+    },
+    () => preferences
+  );
+  const compiling = runtime.compileMod(state, entry);
+  await readingInstalled;
+  const newInstallation = path.resolve('work', 'other-windhawk');
+  state.editor.installationPath = newInstallation;
+  state.windhawk = { ...state.windhawk, root: newInstallation };
+  preferences = { elevation: 'sudo', gsudoPath: '' };
+  finishInstalledRead({ config: null });
+  await compiling;
+  assert.deepEqual(events.errors, []);
+  assert.deepEqual(installs, [{ rootPath: installation, elevation: startingPreferences }]);
+  assert.deepEqual(Object.keys(events.snapshots), [installedModKey(installation, 'local@demo-mod')]);
 });
 
 test('one operation per installed mod, even across projects', async () => {

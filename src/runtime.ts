@@ -173,18 +173,18 @@ export function createRuntimeOperations(host: RuntimeHost) {
    */
   const compileMod = async (state: ProjectState, entry: EntryState, testOnly = false) => {
     if (entry.busy || stopped(state)) return;
-    if (
-      !testOnly &&
-      entry.runtime?.id &&
-      installedOperations.has(installedModKey(state.editor.installationPath, entry.runtime.id))
-    ) {
+    const installation = state.windhawk;
+    const root = testOnly ? state.editor.installationPath : (installation?.root ?? state.editor.installationPath);
+    if (!testOnly && entry.runtime?.id && installedOperations.has(installedModKey(root, entry.runtime.id))) {
       host.inform('This mod already has an operation running.');
       return;
     }
-    if (!testOnly && !state.windhawk?.cli) {
-      host.inform(state.windhawk?.notice ?? 'Select your Windhawk installation in Settings → Extension settings.');
+    if (!testOnly && !installation?.cli) {
+      host.inform(installation?.notice ?? 'Select your Windhawk installation in Settings → Extension settings.');
       return;
     }
+    // Settings can change while saving or generating the source.
+    const elevation = testOnly ? undefined : host.installationPreferences();
     const abort = new AbortController();
     entry.abort = abort;
     setBusy(entry, testOnly ? 'test' : 'compile');
@@ -200,11 +200,11 @@ export function createRuntimeOperations(host: RuntimeHost) {
         if (!snapshot.bytes || snapshot.diagnostics.some(issue => issue.severity === 'error'))
           throw new Error(snapshot.diagnostics.map(issue => issue.message).join('\n'));
         const result = await tools.checkModBuild(
-          state.editor.installationPath,
+          root,
           snapshot.bytes.toString(),
           abort.signal,
           text => log.append(text),
-          state.windhawk?.version
+          installation?.version
         );
         if (result?.warnings) log.show(true);
         entry.compilerDiagnostics = [];
@@ -220,8 +220,7 @@ export function createRuntimeOperations(host: RuntimeHost) {
       const source = entry.result.bytes.toString();
       const modId = localModId(parseMetadata(source, entry.path).fields.id?.[0]);
       if (!modId) throw new Error('Add a valid @id before compiling.');
-      const root = state.windhawk!.root,
-        key = installedModKey(root, modId);
+      const key = installedModKey(root, modId);
       if (installedOperations.has(key)) {
         host.inform('This mod already has an operation running.');
         return;
@@ -238,7 +237,7 @@ export function createRuntimeOperations(host: RuntimeHost) {
         source,
         text => log.append(text),
         abort.signal,
-        host.installationPreferences()
+        elevation
       );
       if (result.id !== modId) throw new Error('Windhawk returned an unexpected compiled mod ID.');
       const library = result.config?.libraryFileName;
@@ -348,10 +347,12 @@ export function createRuntimeOperations(host: RuntimeHost) {
   /** Syntax-check the saved output with Windhawk's compiler, or a compiler the user names. */
   const verify = async (state: ProjectState, entry: EntryState) => {
     if (entry.busy || stopped(state)) return;
+    const root = state.editor.installationPath;
+    const windhawkVersion = state.windhawk?.version;
     let executable: string | undefined,
       args: string[] = [];
     const file = outputPath(state.project, entry.path);
-    if (!state.editor.installationPath) {
+    if (!root) {
       const compiler = await host.promptCompiler();
       if (!compiler) return;
       executable = compiler.executable;
@@ -364,14 +365,14 @@ export function createRuntimeOperations(host: RuntimeHost) {
     setBusy(entry, 'verify');
     host.publish();
     try {
-      if (state.editor.installationPath) {
+      if (root) {
         const source = await fs.readFile(file, 'utf8');
         const result = await tools.checkModBuild(
-          state.editor.installationPath,
+          root,
           source,
           abort.signal,
           text => log.append(text),
-          state.windhawk?.version,
+          windhawkVersion,
           true
         );
         if (result?.warnings) log.show(true);
