@@ -12,7 +12,7 @@
     "includeDirectories": { "type": "array", "items": { "type": "string" }, "default": ["src"], "description": "Ordered search directories relative to project root." },
     "externalIncludes": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Exact quoted header names or complete macro include expressions to leave external." },
     "inlineAngleIncludes": { "type": "boolean", "default": false },
-    "generate": { "enum": ["onSave", "manual"], "default": "onSave" },
-    "debounceMs": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 250 }
+    "generate": { "enum": ["onSave", "manual"], "default": "onSave", "deprecationMessage": "Use the wham.generate VS Code setting. WHAM reads this only while that setting is unset." },
+    "debounceMs": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 250, "deprecationMessage": "Use the wham.debounceMs VS Code setting. WHAM reads this only while that setting is unset." }
   }
 }

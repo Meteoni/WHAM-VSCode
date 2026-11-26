@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { contained, defaults, discoverEntries, outputPath, validateConfig } from './config';
+import { contained, defaults, discoverEntries, layoutConfig, outputPath, validateConfig } from './config';
 import { checksum, generateEntry, restoreSource } from './engine';
 import {
   assertSafeDestination,
@@ -13,7 +13,7 @@ import {
   readIfExists,
   writeOutput
 } from './io';
-import { Project } from './types';
+import { Configuration, GenerationTiming, Project } from './types';
 import { parseMetadata, parseDraftSource } from './metadata';
 import {
   inspectWindhawk,
@@ -114,6 +114,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       integration: overrides.integration ?? localPreferences.computer.integration
     };
   };
+  /** A timing value set in user, workspace or folder settings, with the level that holds it. */
+  const explicitTiming = <K extends keyof GenerationTiming>(root: string, key: K) => {
+    const inspected = vscode.workspace.getConfiguration('wham', vscode.Uri.file(root)).inspect<unknown>(key);
+    const levels = [
+      [inspected?.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder],
+      [inspected?.workspaceValue, vscode.ConfigurationTarget.Workspace],
+      [inspected?.globalValue, vscode.ConfigurationTarget.Global]
+    ] as const;
+    const valid = (value: unknown): value is GenerationTiming[K] =>
+      key === 'generate'
+        ? value === 'onSave' || value === 'manual'
+        : Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 10000;
+    const found = levels.find(([value]) => valid(value));
+    return found && { value: found[0] as GenerationTiming[K], target: found[1] };
+  };
+  /** Settings win; older project files that still hold `generate`/`debounceMs` are the fallback. */
+  const timing = (state: ProjectState): GenerationTiming => ({
+    generate: explicitTiming(state.project.root, 'generate')?.value ?? state.project.config.generate,
+    debounceMs: explicitTiming(state.project.root, 'debounceMs')?.value ?? state.project.config.debounceMs
+  });
+  /**
+   * Store changed timing in VS Code settings. After save / Manual belongs to this project: its
+   * folder settings when it is a workspace folder. Otherwise, and for the debounce, the level
+   * that already holds a value, or user settings.
+   */
+  const saveTiming = async (state: ProjectState, next: GenerationTiming) => {
+    const current = timing(state);
+    const folder = vscode.workspace.workspaceFolders?.some(folder => sameFile(folder.uri.fsPath, state.project.root));
+    for (const key of ['generate', 'debounceMs'] as const) {
+      if (next[key] === current[key]) continue;
+      const target =
+        key === 'generate' && folder
+          ? vscode.ConfigurationTarget.WorkspaceFolder
+          : (explicitTiming(state.project.root, key)?.target ?? vscode.ConfigurationTarget.Global);
+      await vscode.workspace
+        .getConfiguration('wham', vscode.Uri.file(state.project.root))
+        .update(key, next[key], target);
+    }
+  };
   const refreshEditorConfiguration = async (state: ProjectState) => {
     state.editorNeedsApply = true;
     try {
@@ -212,7 +251,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       projects: [...projects.values()].map(item => ({
         root: item.project.root,
         name: path.basename(item.project.root),
-        config: item.project.config,
+        // Settings → Generation shows the timing in effect, wherever it is stored.
+        config: { ...item.project.config, ...timing(item) },
         editor: item.editor,
         editorNeedsApply: item.editorNeedsApply,
         local: projectPreferences(item.project.root),
@@ -291,12 +331,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         state.editor = await resolveEditor(state.project.root);
         await refreshEditorConfiguration(state);
         publish();
-      }
+      },
+      timing
     },
     storedHashes
   );
   const { relevantDirty, reconcileOutput, scheduleRefresh, refresh, enqueue } = pipeline;
   const changed = (file: string, discovery = false) => pipeline.changed(projects.values(), file, discovery);
+  /** After loading, or switching to After save, catch up on what manual mode left stale. */
+  const generateStale = (state: ProjectState) => {
+    if (timing(state).generate !== 'onSave') return;
+    const stale = [...state.entries.values()].filter(entry => entry.status === 'stale').map(entry => entry.path);
+    if (stale.length) void enqueue(state, stale);
+  };
   const saveRelevant = async (state: ProjectState): Promise<boolean> => {
     const files = relevantDirty(state);
     const dirty = vscode.workspace.textDocuments.filter(
@@ -534,10 +581,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await refreshDraft(state);
       await rememberProject(root);
       scheduleRefresh(state, true);
-      if (state.project.config.generate === 'onSave') {
-        const stale = [...state.entries.values()].filter(entry => entry.status === 'stale').map(entry => entry.path);
-        if (stale.length) void enqueue(state, stale);
-      }
+      generateStale(state);
     } catch (error) {
       state.error = String(error);
     }
@@ -706,7 +750,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const contents = new Map(
       [...result.files].map(([file, candidates]) => [file, candidates[selections.get(file) ?? 0].bytes])
     );
-    contents.set('windhawk-amalgamation.json', Buffer.from(JSON.stringify(result.manifest.config, null, 2) + '\n'));
+    contents.set(
+      'windhawk-amalgamation.json',
+      Buffer.from(JSON.stringify(layoutConfig(result.manifest.config), null, 2) + '\n')
+    );
     const differences: string[] = [],
       previous = new Map<string, Buffer | undefined>();
     for (const [file, bytes] of contents) {
@@ -1087,8 +1134,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
     return picked?.entry;
   };
+  /** Layout goes to the project file; when to generate goes to VS Code settings. */
   const updateConfig = async (state: ProjectState, input: unknown) => {
     const config = validateConfig(input);
+    const layoutChanged = JSON.stringify(layoutConfig(config)) !== JSON.stringify(layoutConfig(state.project.config));
+    if (layoutChanged) await updateLayout(state, config);
+    // The rewritten file no longer holds timing; keep the timing the form showed.
+    await saveTiming(state, { generate: config.generate, debounceMs: config.debounceMs });
+    if (layoutChanged && timing(state).generate === 'onSave') await enqueue(state);
+  };
+  const updateLayout = async (state: ProjectState, config: Configuration) => {
     if (isDirty(path.join(state.project.root, 'windhawk-amalgamation.json')))
       throw new Error('Save or revert the configuration editor before updating sidebar settings.');
     const update = state.queue.then(async () => {
@@ -1102,7 +1157,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await writeOutput(
         state.project,
         path.join(state.project.root, 'windhawk-amalgamation.json'),
-        Buffer.from(JSON.stringify(config, null, 2) + '\n')
+        Buffer.from(JSON.stringify(layoutConfig(config), null, 2) + '\n')
       );
       // Generated output stays out of Git wherever it moves, as setup arranged for the first one.
       if (config.outputDirectory !== state.project.config.outputDirectory)
@@ -1125,7 +1180,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       () => undefined
     );
     await update;
-    if (state.project.config.generate === 'onSave') await enqueue(state);
   };
   const runModAction = async (state: ProjectState, entry: EntryState, action: string, line?: number) => {
     if (state.removed || !state.entries.has(entry.path)) throw new Error('This mod is no longer in the project.');
@@ -1261,11 +1315,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   register('toggleOnSave', async () => {
     const state = active();
-    if (state)
-      await updateConfig(state, {
-        ...state.project.config,
-        generate: state.project.config.generate === 'onSave' ? 'manual' : 'onSave'
-      });
+    if (!state) return;
+    const current = timing(state);
+    await saveTiming(state, { ...current, generate: current.generate === 'onSave' ? 'manual' : 'onSave' });
   });
   // Sidebar protocol: parsing and dispatch live in sidebar.ts; these are the operations.
   const postToSidebar = (message: unknown) => view?.webview.postMessage(message);
@@ -1517,6 +1569,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         presentDiagnostics();
         publish();
       }
+    }),
+    // Timing changed from the sidebar, the toggle command, or the Settings editor.
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (!event.affectsConfiguration('wham.generate') && !event.affectsConfiguration('wham.debounceMs')) return;
+      for (const state of projects.values())
+        if (timing(state).generate === 'manual') {
+          // A save made just before switching to Manual doesn't generate after it; it stays stale.
+          if (state.timer) clearTimeout(state.timer);
+          state.pending.clear();
+        } else generateStale(state);
+      publish();
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(event => {
       for (const folder of event.added)

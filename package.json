@@ -56,6 +56,28 @@
     "configuration": {
       "title": "WHAM",
       "properties": {
+        "wham.generate": {
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "onSave",
+            "manual"
+          ],
+          "enumDescriptions": [
+            "Generate a mod's output after saving any of its source files.",
+            "Generate only from Generate or Generate all."
+          ],
+          "default": "onSave",
+          "description": "When WHAM generates outputs. Set it per project in folder settings. Older projects' `generate` in windhawk-amalgamation.json applies until this is set."
+        },
+        "wham.debounceMs": {
+          "scope": "window",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000,
+          "default": 250,
+          "description": "How long WHAM waits after a save before generating, in milliseconds. Older projects' `debounceMs` in windhawk-amalgamation.json applies until this is set."
+        },
         "wham.createInitialCommit": {
           "scope": "application",
           "type": "boolean",

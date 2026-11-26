@@ -53,6 +53,7 @@
             <label>External includes <small>Exact header name or macro expression per line</small><textarea name="externalIncludes" rows="2"></textarea></label>
             <label>Generation<select name="generate"><option value="onSave">After save</option><option value="manual">Manual</option></select></label>
             <label>Debounce (ms)<input name="debounceMs" type="number" min="0" max="10000" step="1"></label>
+            <p class="muted">Generation and debounce are saved in your VS Code settings, not the project file.</p>
             <label class="checkbox"><input name="inlineAngleIncludes" type="checkbox"> Expand local angle includes</label>
             <button type="submit" class="primary">Save configuration</button><p id="settings-status" role="status"></p>
           </form>

@@ -13,6 +13,7 @@ import {
 } from './io';
 import { parseMetadata } from './metadata';
 import { dependsOn, EntryState, ownedOutput, ProjectState, sameFile } from './projects';
+import { GenerationTiming } from './types';
 
 /**
  * What the generation pipeline needs from its environment. The extension implements it
@@ -42,6 +43,8 @@ export interface GenerationHost {
   refreshEditorConfiguration(state: ProjectState): Promise<void>;
   /** An editor configuration file in the project changed on disk. */
   editorFilesChanged(state: ProjectState): Promise<void>;
+  /** When this project generates: after saves or manually, and the debounce. */
+  timing(state: ProjectState): GenerationTiming;
 }
 
 /** Editor configuration files WHAM generates; changes to them refresh editor state only. */
@@ -277,7 +280,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
     return state.queue;
   };
 
-  /** Debounce generation of `targets` by the project's debounceMs. */
+  /** Debounce generation of `targets` by the project's debounce. */
   const schedule = (state: ProjectState, targets: string[]) => {
     if (stopped(state)) return;
     for (const target of targets) {
@@ -290,7 +293,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
       const targets = [...state.pending];
       state.pending.clear();
       void enqueue(state, targets, { refreshProject: false });
-    }, state.project.config.debounceMs);
+    }, host.timing(state).debounceMs);
   };
 
   /**
@@ -351,7 +354,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
             const affected = [...state.entries.values()].filter(
               entry => configurationChanged || !entry.draft || targets.includes(entry)
             );
-            if (state.project.config.generate === 'onSave')
+            if (host.timing(state).generate === 'onSave')
               schedule(
                 state,
                 affected.map(entry => entry.path)
@@ -363,7 +366,7 @@ export function createGenerationPipeline(host: GenerationHost, storedHashes: Rec
           host.publish();
         });
       } else if (targets.length) {
-        if (state.project.config.generate === 'onSave')
+        if (host.timing(state).generate === 'onSave')
           schedule(
             state,
             targets.map(entry => entry.path)

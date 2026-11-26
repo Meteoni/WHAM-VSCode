@@ -65,13 +65,16 @@ Include boundaries use short readable comments, such as `// WHAM@5 begin 1: src/
   "exclude": [],
   "includeDirectories": ["src"],
   "externalIncludes": [],
-  "inlineAngleIncludes": false,
-  "generate": "onSave",
-  "debounceMs": 250
+  "inlineAngleIncludes": false
 }
 ```
 
-Entry and exclusion globs are relative to `sourceDirectory`. Other directories are relative to the project root and must use portable forward-slash paths. Quoted includes search the including file's directory first, then configured include directories in order. There is no basename search. `externalIncludes` lists exact quoted header names or complete macro expressions to preserve as external. Angle includes remain external unless local angle expansion is enabled. `generate` and `debounceMs` only control when WHAM generates. Generated outputs don't record them, so changing them leaves outputs and compile status unchanged. Recovered projects start with the defaults.
+Entry and exclusion globs are relative to `sourceDirectory`. Other directories are relative to the project root and must use portable forward-slash paths. Quoted includes search the including file's directory first, then configured include directories in order. There is no basename search. `externalIncludes` lists exact quoted header names or complete macro expressions to preserve as external. Angle includes remain external unless local angle expansion is enabled. When WHAM generates is a VS Code setting rather than part of the project:
+
+- `wham.generate`: After save (`onSave`) or Manual. **Settings → Generation** and **WHAM: Toggle Generate on Save** store it in the project's folder settings. For projects outside the workspace folders, they store it in your user settings.
+- `wham.debounceMs`: the wait after a save, stored in your user settings.
+
+Both can also be changed in the VS Code Settings editor. Older projects may still list `generate` and `debounceMs` in `windhawk-amalgamation.json`. WHAM uses those values until the settings are set, and drops them the next time it saves the project file. Generated outputs don't record either value, so changing them leaves outputs and compile status unchanged.
 
 All branches are preserved. Missing quoted includes inside `#if 0` still require a file or explicit external rule. Ordinary guards and repeatable headers retain compiler-controlled behavior. Conventional leading, unconditional `#pragma once` becomes a reversible per-file guard. After a full expansion reached without enclosing conditionals, later includes of that same file become compact references to its body. References preserve the exact original directives for recovery. Conditional ancestry is tracked through nested includes; an uncertain earlier include does not justify deduplication. Ordinary macro guards and all existing defines remain untouched. Retained copies that differ still require recovery conflict resolution.
 

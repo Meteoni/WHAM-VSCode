@@ -48,7 +48,8 @@ async function project(files, config = {}) {
     },
     refreshRuntime: async () => {},
     refreshEditorConfiguration: async () => {},
-    editorFilesChanged: async () => {}
+    editorFilesChanged: async () => {},
+    timing: state => ({ generate: state.project.config.generate, debounceMs: state.project.config.debounceMs })
   };
   pipeline = createGenerationPipeline(host, hashes);
   const state = {

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { contained, portablePath, portableRelative, validateConfig } from './config';
+import { contained, layoutConfig, portablePath, portableRelative, validateConfig } from './config';
 import { scanSource } from './scanner';
 import {
   Configuration,
@@ -560,11 +560,7 @@ export async function generateEntry(project: Project, entryPath: string, files: 
     if (result.diagnostics.some(item => item.severity === 'error')) return result;
     const root = portableRelative(project.root, entryPath);
     const rootRelative = path.posix.relative(project.config.sourceDirectory, root);
-    const config: Partial<Configuration> = { ...project.config, entries: [literalGlob(rootRelative)], exclude: [] };
-    // When to generate is a local workflow choice, not layout. Leaving it out keeps the
-    // output, and so its compiled-source hash, unchanged when it changes.
-    delete config.generate;
-    delete config.debounceMs;
+    const config = { ...layoutConfig(project.config), entries: [literalGlob(rootRelative)], exclude: [] };
     const tail = body && !body.endsWith('\n') ? '\n' : '';
     const manifest: Omit<Manifest, 'config'> & { config: Partial<Configuration> } = {
       type: 'manifest',

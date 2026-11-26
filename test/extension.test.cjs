@@ -49,7 +49,11 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     documents = [],
     stored = {},
     globalStored = {},
-    generations = new Map();
+    generations = new Map(),
+    // VS Code settings as user-level values, and the target of each write.
+    vscodeSettings = {},
+    settingTargets = {};
+  let onSettings;
   const disposable = () => ({ dispose() {} });
   const Uri = {
     file(file) {
@@ -66,6 +70,7 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     Uri,
     StatusBarAlignment: { Left: 1 },
     DiagnosticSeverity: { Error: 0, Warning: 1 },
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     extensions: { getExtension: () => undefined },
     Range: class {},
     Diagnostic: class {},
@@ -79,7 +84,19 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     workspace: {
       workspaceFolders: [{ uri: Uri.file(root) }],
       textDocuments: documents,
-      getConfiguration: () => ({ get: () => undefined }),
+      getConfiguration: section => ({
+        get: key => vscodeSettings[section + '.' + key],
+        inspect: key => ({ globalValue: vscodeSettings[section + '.' + key] }),
+        async update(key, value, target) {
+          vscodeSettings[section + '.' + key] = value;
+          settingTargets[section + '.' + key] = target;
+          onSettings?.({ affectsConfiguration: name => name === section + '.' + key });
+        }
+      }),
+      onDidChangeConfiguration(fn) {
+        onSettings = fn;
+        return disposable();
+      },
       registerTextDocumentContentProvider: disposable,
       createFileSystemWatcher(pattern) {
         const watcher = {
@@ -454,9 +471,17 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     await new Promise(resolve => setTimeout(resolve, 450));
     assert.ok((await fs.readFile(twoOutput, 'utf8')).includes('shared = 3'));
     documents.length = 0;
-    // Config is persisted from sidebar; manual mode suppresses source-save writes.
+    // Manual mode from the sidebar goes to this project's folder settings, not the project
+    // file, and suppresses source-save writes.
+    const configBefore = await fs.readFile(path.join(root, 'windhawk-amalgamation.json'));
     await receive({ action: 'config', root, config: { ...defaults, debounceMs: 10, generate: 'manual' } });
-    assert.equal(JSON.parse(await fs.readFile(path.join(root, 'windhawk-amalgamation.json'))).generate, 'manual');
+    assert.equal(vscodeSettings['wham.generate'], 'manual');
+    assert.equal(settingTargets['wham.generate'], mock.ConfigurationTarget.WorkspaceFolder);
+    assert.equal(vscodeSettings['wham.debounceMs'], undefined, 'An unchanged debounce is not written');
+    assert.deepEqual(await fs.readFile(path.join(root, 'windhawk-amalgamation.json')), configBefore);
+    assert.equal(project().config.generate, 'manual');
+    // A timing change doesn't wait for the project's queue; let earlier work finish first.
+    await new Promise(resolve => setTimeout(resolve, 450));
     const manualOutput = await fs.readFile(twoOutput);
     await fs.writeFile(shared, '#pragma once\nint shared = 5;\n');
     onSave({ uri: Uri.file(shared) });
@@ -487,8 +512,9 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     // A failed resolution is retried when the missing header appears.
     await fs.writeFile(path.join(root, 'src/new.cpp'), '#include "missing.h"\n');
     watchers[0].create(Uri.file(path.join(root, 'src/new.cpp')));
+    // Back to After save: the new entry is discovered and generated, and fails on its missing header.
     await receive({ action: 'config', root, config: { ...defaults, debounceMs: 10 } });
-    assert.equal(project().entries.find(entry => entry.path.endsWith('new.cpp')).status, 'stale');
+    await settle(() => project()?.entries.find(entry => entry.path.endsWith('new.cpp'))?.status === 'stale');
     await fs.writeFile(path.join(root, 'src/missing.h'), 'int found;\n');
     watchers[0].create(Uri.file(path.join(root, 'src/missing.h')));
     await settle(async () => {
@@ -519,6 +545,17 @@ test('adapter sidebar, serialized saves, dependencies, output protection and con
     const ignoreLines = (await fs.readFile(path.join(root, '.gitignore'), 'utf8')).split(/\r?\n/);
     assert.ok(ignoreLines.includes('/build/'));
     assert.equal(ignoreLines.filter(line => line === '/output/').length, 1);
+    // Rewriting the layout drops the file's timing; the settings keep the timing that was in effect.
+    const rewritten = JSON.parse(await fs.readFile(path.join(root, 'windhawk-amalgamation.json')));
+    assert.ok(!('generate' in rewritten) && !('debounceMs' in rewritten));
+    assert.equal(vscodeSettings['wham.debounceMs'], 10);
+    assert.equal(settingTargets['wham.debounceMs'], mock.ConfigurationTarget.Global);
+    assert.equal(project().config.debounceMs, 10);
+    // The command flips this project's setting.
+    await commands.get('windhawk.toggleOnSave')();
+    assert.equal(vscodeSettings['wham.generate'], 'manual');
+    await commands.get('windhawk.toggleOnSave')();
+    assert.equal(vscodeSettings['wham.generate'], 'onSave');
     // Command actions go directly to the only mod.
     mock.window.showQuickPick = async () => {
       throw new Error('A single mod does not need a picker');

@@ -226,6 +226,7 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
         this.pattern = pattern;
       }
     },
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     languages: {
       createDiagnosticCollection: () => ({
         ...disposable(),
@@ -240,7 +241,8 @@ test('runtime controls submit a fixed snapshot, preserve enabled state/builds, m
     workspace: {
       workspaceFolders: [{ uri: Uri.file(root) }],
       textDocuments: documents,
-      getConfiguration: () => ({ get: () => undefined }),
+      getConfiguration: () => ({ get: () => undefined, inspect: () => undefined }),
+      onDidChangeConfiguration: disposable,
       registerTextDocumentContentProvider: disposable,
       createFileSystemWatcher() {
         const watcher = {
