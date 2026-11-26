@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { contained, portablePath, portableRelative, validateConfig } from './config';
 import { scanSource } from './scanner';
 import {
+  Configuration,
   FileAccess,
   GenerationResult,
   Manifest,
@@ -559,9 +560,13 @@ export async function generateEntry(project: Project, entryPath: string, files: 
     if (result.diagnostics.some(item => item.severity === 'error')) return result;
     const root = portableRelative(project.root, entryPath);
     const rootRelative = path.posix.relative(project.config.sourceDirectory, root);
-    const config = { ...project.config, entries: [literalGlob(rootRelative)], exclude: [] };
+    const config: Partial<Configuration> = { ...project.config, entries: [literalGlob(rootRelative)], exclude: [] };
+    // When to generate is a local workflow choice, not layout. Leaving it out keeps the
+    // output, and so its compiled-source hash, unchanged when it changes.
+    delete config.generate;
+    delete config.debounceMs;
     const tail = body && !body.endsWith('\n') ? '\n' : '';
-    const manifest: Manifest = {
+    const manifest: Omit<Manifest, 'config'> & { config: Partial<Configuration> } = {
       type: 'manifest',
       version: 5,
       root,
@@ -657,7 +662,8 @@ export function restoreSource(bytes: Buffer): RestoreResult {
   )
     throw new Error('Unsupported or malformed manifest.');
   portablePath(manifest.root);
-  validateConfig(manifest.config);
+  // Newer footers omit generation timing; recovered projects get the defaults.
+  manifest.config = validateConfig(manifest.config);
   if (manifest.tail !== '' && manifest.tail !== '\n') throw new Error('Invalid root padding.');
   const fileRecords = new Map<string, Manifest['files'][number]>(),
     cases = new Set<string>();

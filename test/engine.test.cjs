@@ -62,6 +62,17 @@ test('recovered entry globs match exactly their own file, including glob metacha
   assert.deepEqual(merged.manifest.config.entries, ['a@(!)b.cpp']);
 });
 
+test('generation timing stays out of the output and recovers as the defaults', async () => {
+  const contents = { 'src/mod.cpp': 'int x;\n' };
+  const { generated, recovered } = await roundTrip(contents);
+  const manual = fixture(contents, { generate: 'manual', debounceMs: 900 });
+  const changed = await generateEntry(manual.project, path.join(manual.project.root, 'src/mod.cpp'), manual.access);
+  assert.deepEqual(changed.bytes, generated.bytes);
+  assert.ok(!/"generate"|"debounceMs"/.test(generated.bytes.toString()));
+  assert.equal(recovered.manifest.config.generate, defaults.generate);
+  assert.equal(recovered.manifest.config.debounceMs, defaults.debounceMs);
+});
+
 test('hand-constructed nested v1 container restores exact files', async () => {
   const fixtureRoot = path.join(__dirname, 'fixtures');
   const recovered = restoreSource(await fs.readFile(path.join(fixtureRoot, 'handcrafted.wh.cpp')));

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - The sidebar updates only the mod cards that changed. Open compile menus, the mod page's More menu, the project list and keyboard focus are no longer reset by updates about other mods; a card that does change keeps its open menu and focused control.
+- Generated outputs no longer record `generate` and `debounceMs`. Switching between after-save and manual generation, or changing the debounce, no longer rewrites every output or marks installed mods as uncompiled. Existing outputs regenerate once after upgrading, so compiled mods show as uncompiled until they're compiled again. Recovered projects start with the default generation settings.
 
 ## 1.7.2
 
