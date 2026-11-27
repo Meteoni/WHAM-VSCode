@@ -194,7 +194,9 @@ test('outputs changed on disk are flagged, and new entries are discovered', asyn
     await p.pipeline.enqueue(p.state);
     await p.write('output/b.wh.cpp', 'int b; // edited\n');
     p.pipeline.changed([p.state], p.at('output/b.wh.cpp'));
-    await new Promise(resolve => setTimeout(resolve, 40));
+    // The refresh runs after a debounce; under a loaded test run it can take longer than one interval.
+    for (let waited = 0; p.entry('src/b.cpp').status !== 'blocked' && waited < 2000; waited += 20)
+      await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(p.entry('src/b.cpp').status, 'blocked');
     assert.equal(p.entry('src/b.cpp').message, 'Generated output changed on disk.');
     await p.write('src/c.cpp', 'int c;\n');
