@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 1.8.0
 
 - Improve contrast for WHAM’s sidebar and preview controls, focus indicators, and status messages in VS Code’s built-in themes.
 - The read-only Draft preview uses the Windhawk 2.0.0-alpha.8 Discover renderer and follows the VS Code theme while open.
