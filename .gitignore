@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# The vendored IPC package includes its upstream package entry points.
+!/vendor/windhawk/src/windhawk-webview-ipc-contract/dist/
 *.vsix
 work/
 examples/demo/output/

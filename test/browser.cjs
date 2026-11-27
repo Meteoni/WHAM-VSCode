@@ -84,7 +84,7 @@ const { parse } = require('jsonc-parser');
       )
       .replaceAll(
         '{{iconFont}}',
-        pathToFileURL(path.resolve('media/windhawk-renderer/codicon.edde7c4363c6d735a416.ttf')).href
+        pathToFileURL(path.resolve('media/windhawk-renderer/codicon.b5576db5d289588c1912.ttf')).href
       )
       .replaceAll('{{sidebarStyles}}', await fs.readFile('media/sidebar.css', 'utf8'))
       .replaceAll('{{script}}', pathToFileURL(path.resolve('media/sidebar.js')).href);

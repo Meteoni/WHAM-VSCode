@@ -199,7 +199,16 @@ const windhawk = require('../dist/windhawk');
     assert.deepEqual(await toolbarSize(), before, 'Vendor styles must not resize the WHAM toolbar');
     assert.equal(await preview.locator('strong').filter({ hasText: 'Formatted text' }).count(), 1);
     assert.equal(await page.evaluate(() => window.hacked), undefined, 'README scripts cannot execute');
-    assert.ok(await preview.getByTestId('mod-details-tab-code').isHidden());
+    assert.deepEqual(await preview.getByRole('tab').allTextContents(), ['Details', 'Settings']);
+    for (const id of [
+      'app-header',
+      'mod-details-back',
+      'mod-actions',
+      'mod-details-open-in-browser',
+      'mod-details-share'
+    ])
+      assert.ok(await page.getByTestId(id).isHidden(), `${id} is hidden`);
+    assert.ok(await preview.locator('.ant-card-meta-title > .ant-radio-group').isHidden());
     assert.deepEqual(await page.locator('#mod-tools button:visible').allTextContents(), ['Source', 'Output']);
     for (const action of ['generate', 'open', 'output', 'compare', 'restore', 'verify']) {
       if (!['open', 'output'].includes(action))
@@ -253,6 +262,8 @@ const windhawk = require('../dist/windhawk');
       const cardBounds = await preview.locator(':scope > .ant-card').boundingBox();
       const headerBounds = await page.locator('#wham-header').boundingBox();
       assert.equal(cardBounds.y, headerBounds.y + headerBounds.height, 'Preview starts directly below the toolbar');
+      assert.deepEqual(await preview.getByRole('tab').allTextContents(), ['Details', 'Settings']);
+      assert.ok(await preview.locator('.ant-tabs-nav-more').isHidden(), 'The overflow menu cannot expose hidden tabs');
       await page.getByRole('button', { name: 'More actions', exact: true }).click();
       await page.waitForTimeout(50);
       const bounds = await page.getByRole('menu').boundingBox();
@@ -262,13 +273,22 @@ const windhawk = require('../dist/windhawk');
     }
     await page.setViewportSize({ width: 340, height: 850 });
     await page.screenshot({ path: 'work/screenshots/pinned-draft-narrow.png' });
+    const card = preview.locator(':scope > .ant-card');
+    assert.equal(await page.locator('body').getAttribute('data-theme'), 'dark');
+    const darkBackground = await card.evaluate(element => getComputedStyle(element).backgroundColor);
     await page.evaluate(() => document.body.classList.replace('vscode-dark', 'vscode-light'));
-    await page.waitForTimeout(200);
-    assert.notEqual(await page.locator('link[data-theme-stylesheet="light"]').getAttribute('media'), 'not all');
-    await page.screenshot({ path: 'work/screenshots/pinned-draft-light.png' });
+    await page.waitForFunction(() => document.body.dataset.theme === 'light');
+    assert.notEqual(await card.evaluate(element => getComputedStyle(element).backgroundColor), darkBackground);
+    await page.screenshot({ path: 'work/screenshots/pinned-draft-light.png', animations: 'disabled' });
+    await page.evaluate(() => document.body.classList.replace('vscode-light', 'vscode-dark'));
+    await page.waitForFunction(() => document.body.dataset.theme === 'dark');
     await page.getByRole('button', { name: 'Back to all mods', exact: true }).click();
     assert.deepEqual(navigations, ['project']);
     assert.deepEqual(errors, []);
+    await page.evaluate(() =>
+      window.acquireVsCodeApi().postMessage({ type: 'messageWithReply', command: 'setModSettings', messageId: 998 })
+    );
+    assert.ok(!messages.some(message => message.command === 'setModSettings'));
     // Even a forged frontend settings-write message is rejected before any native call.
     await receive({
       action: 'windhawk',
@@ -278,7 +298,7 @@ const windhawk = require('../dist/windhawk');
       epoch: messages.at(-1).epoch,
       session: messages.at(-1).session
     });
-    assert.match(errors.at(-1), /read-only source preview/);
+    assert.match(errors.pop(), /read-only source preview/);
     details.dispose();
     mock.env.language = 'zh-cn';
     const localizedSource = source
@@ -326,6 +346,7 @@ const windhawk = require('../dist/windhawk');
     assert.ok(await preview.getByTestId('mod-settings-save').isHidden());
     await page.screenshot({ path: 'work/screenshots/pinned-draft-modern.png' });
     modern.dispose();
+    assert.deepEqual(errors, []);
     console.log(
       'Pinned Draft passed without Windhawk: async shell, actions, read-only settings, refresh, themes, narrow layouts and mutation rejection.'
     );
