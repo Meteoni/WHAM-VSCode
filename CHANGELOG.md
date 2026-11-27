@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Improve contrast for WHAM’s sidebar and preview controls, focus indicators, and status messages in VS Code’s built-in themes.
 - The read-only Draft preview uses the Windhawk 2.0.0-alpha.8 Discover renderer and follows the VS Code theme while open.
 - Applying editor settings recommends both Microsoft C/C++ and clangd in the shared project file, regardless of your language service choice.
 - WHAM removes unchanged outputs when their source entries are deleted, even if you opened the project in a different VS Code workspace.
